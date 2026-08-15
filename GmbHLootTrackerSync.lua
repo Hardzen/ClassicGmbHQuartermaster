@@ -7,14 +7,16 @@ GMBHRS — raid sheets, whispered to online guild members (all ranks).
 local PREFIX_WL = "GMBHWL"
 local PREFIX_RAID = "GMBHRS"
 local PRESENCE_PREFIX = "GMBHPR"
-local CHUNK_SIZE = 200
+local CHUNK_SIZE = 180
 local SHARE_COOLDOWN = 20
 -- Per-batch chunk cap (addon message rate). Multiple batches cover the full list.
-local MAX_CHUNKS_PER_BATCH = 60
+local MAX_CHUNKS_PER_BATCH = 40
 local MAX_BATCHES = 80
--- Slightly slower than before — whisper addon messages drop under load.
-local CHUNK_GAP = 0.15
-local BATCH_GAP = 2.0
+-- Gargul/ChatThrottleLib paces ~0.08s; we stay conservative on whispers.
+local CHUNK_GAP = 0.12
+local BATCH_GAP = 1.5
+local OUT_GAP = 0.08
+local APPLY_LINES_PER_FRAME = 4
 local PRESENCE_TTL = 900
 local PRESENCE_ANNOUNCE_GAP = 120
 local AUTO_SYNC_GAP = 90
@@ -146,6 +148,9 @@ local lastRetryAt = { wl = 0, raid = 0 }
 local shareBusy = { wl = false, raid = false }
 local shareQuiet = { wl = false, raid = false }
 local shareTargets = { wl = nil, raid = nil }
+-- Recent ANNOUNCE offers: kind → bareName → { syncedAt, rev, at }
+local peerOffer = { wl = {}, raid = {} }
+local OFFER_TTL = 300
 local autoSyncScheduled = false
 
 local function printMsg(msg)
@@ -584,6 +589,64 @@ local function listOnlineGuildMembers()
   return out
 end
 
+-- Everyone in the current raid/party (connected), excluding self.
+local function listRaidMembers()
+  local me = UnitName("player")
+  local out = {}
+  local seen = {}
+  local function add(name, connected)
+    if not name or name == "" or namesEqual(name, me) then
+      return
+    end
+    if connected == false then
+      return
+    end
+    local key = string.lower(bareName(name))
+    if seen[key] then
+      return
+    end
+    seen[key] = true
+    table.insert(out, name)
+  end
+
+  if IsInRaid and IsInRaid() then
+    local n = (GetNumGroupMembers and GetNumGroupMembers()) or 0
+    for i = 1, n do
+      local unit = "raid" .. i
+      local name = UnitName(unit)
+      local connected = true
+      if UnitIsConnected then
+        connected = UnitIsConnected(unit) and true or false
+      end
+      add(name, connected)
+    end
+  elseif IsInGroup and IsInGroup() then
+    for i = 1, 4 do
+      local unit = "party" .. i
+      if UnitExists and UnitExists(unit) then
+        local name = UnitName(unit)
+        local connected = true
+        if UnitIsConnected then
+          connected = UnitIsConnected(unit) and true or false
+        end
+        add(name, connected)
+      end
+    end
+  end
+  return out
+end
+
+-- Raid sheet peer sync: prefer raid/party roster; guild-wide only when not grouped.
+local function listRaidSyncTargets()
+  if (IsInRaid and IsInRaid()) or (IsInGroup and IsInGroup()) then
+    local members = listRaidMembers()
+    if #members > 0 then
+      return members
+    end
+  end
+  return listOnlineGuildMembers()
+end
+
 local lastRosterPull = 0
 local function ensureGuildRoster()
   if not IsInGuild or not IsInGuild() then
@@ -640,6 +703,132 @@ local function senderIsGuildMember(sender)
   return lookupGuildMember(sender) ~= nil
 end
 
+local function preferredDist(kind)
+  if kind == "raid" then
+    if IsInRaid and IsInRaid() then
+      return "RAID"
+    end
+    if IsInGroup and IsInGroup() then
+      return "PARTY"
+    end
+    return "GUILD"
+  end
+  -- Wishlist: guild channel; non-officers ignore on receive.
+  return "GUILD"
+end
+
+local function aceSend(kind, payload, distribution, target, prio)
+  local Comm = GmbHLootTrackerComm
+  if not Comm or not Comm.SendCommMessage then
+    return false
+  end
+  local prefix = (kind == "raid") and PREFIX_RAID or PREFIX_WL
+  prio = prio or "NORMAL"
+  if distribution == "WHISPER" then
+    if not target or target == "" then
+      return false
+    end
+    Comm:SendCommMessage(prefix, payload, "WHISPER", target, prio)
+  else
+    Comm:SendCommMessage(prefix, payload, distribution, nil, prio)
+  end
+  return true
+end
+
+-- AceComm bulk share (Gargul-style): LibDeflate + AceComm BULK. No BEGIN/CHUNK/END.
+local function aceSharePayload(kind, rev, synced, lines, toPlayer, quiet)
+  local Comm = GmbHLootTrackerComm
+  if not Comm or not Comm.SendCommMessage then
+    return false
+  end
+  if type(lines) ~= "table" or #lines == 0 then
+    return false
+  end
+  local blob = table.concat(lines, "\n")
+  local wire = blob
+  local cmd = "SYNC"
+  if Comm.CanCompress and Comm.CanCompress() and Comm.Compress then
+    local compressed = Comm.Compress(blob)
+    if compressed then
+      wire = compressed
+      cmd = "SYNCZ"
+    end
+  end
+  -- Raid must go compressed when LibDeflate is loaded (avoid fat plaintext AceComm).
+  if kind == "raid" and cmd ~= "SYNCZ" then
+    if not quiet then
+      printMsg("Raid share needs LibDeflate (AceComm+Deflate). /reload after updating the addon.")
+    end
+    return false
+  end
+  local payload = string.format("%s|%s|%s\n%s", cmd, tostring(rev or ""), tostring(synced or ""), wire)
+  shareBusy[kind] = true
+  shareQuiet[kind] = quiet and true or false
+
+  local finished = false
+  local function done()
+    if finished then
+      return
+    end
+    finished = true
+    shareBusy[kind] = false
+    shareTargets[kind] = nil
+    local msg = string.format(
+      "Shared %s via AceComm%s (rev %s, %d→%d bytes).",
+      kindLabel(kind),
+      cmd == "SYNCZ" and "+Deflate" or "",
+      string.sub(tostring(rev or ""), 1, 8),
+      #blob,
+      #wire
+    )
+    if not quiet then
+      printMsg(msg)
+    end
+    setSyncStatus(msg)
+    shareQuiet[kind] = false
+  end
+
+  local function onSent(_, sent, total)
+    if total and sent and sent >= total then
+      done()
+    end
+  end
+
+  local prefix = (kind == "raid") and PREFIX_RAID or PREFIX_WL
+  if toPlayer and tostring(toPlayer) ~= "" then
+    setSyncStatus(string.format("sharing %s with %s…", kindLabel(kind), tostring(toPlayer)))
+    if not quiet then
+      printMsg(string.format(
+        "Sharing %s with %s via AceComm%s (%d lines, %d bytes)…",
+        kindLabel(kind),
+        tostring(toPlayer),
+        cmd == "SYNCZ" and "+Deflate" or "",
+        #lines,
+        #wire
+      ))
+    end
+    Comm:SendCommMessage(prefix, payload, "WHISPER", toPlayer, "BULK", onSent)
+    after(math.max(30, (#payload / 200) * 0.1 + 10), done)
+    return true
+  end
+
+  local dist = preferredDist(kind)
+  setSyncStatus(string.format("sharing %s on %s…", kindLabel(kind), dist))
+  if not quiet then
+    printMsg(string.format(
+      "Sharing %s on %s via AceComm%s (%d lines, %d bytes)…",
+      kindLabel(kind),
+      dist,
+      cmd == "SYNCZ" and "+Deflate" or "",
+      #lines,
+      #wire
+    ))
+  end
+  Comm:SendCommMessage(prefix, payload, dist, nil, "BULK", onSent)
+  after(math.max(30, (#payload / 200) * 0.1 + 10), done)
+  return true
+end
+
 local function sendOne(prefix, payload, target)
   if not target or target == "" then
     return false
@@ -657,29 +846,8 @@ local function sendOne(prefix, payload, target)
   return true
 end
 
--- Whisper targets for a given sync kind (wl → officers, raid → guild).
-local function send(kind, payload, targets)
-  if not IsInGuild() then
-    return false, "not in a guild"
-  end
-  if #payload > 250 then
-    return false, "payload too large"
-  end
-  local prefix = (kind == "raid") and PREFIX_RAID or PREFIX_WL
-  targets = targets or shareTargets[kind]
-  if not targets or #targets == 0 then
-    targets = (kind == "raid") and listOnlineGuildMembers() or listOnlineOfficers()
-  end
-  if #targets == 0 then
-    return false, "no online targets"
-  end
-  for _, target in ipairs(targets) do
-    sendOne(prefix, payload, target)
-  end
-  return true
-end
-
-local function after(seconds, fn)
+local after
+after = function(seconds, fn)
   if C_Timer and C_Timer.After then
     C_Timer.After(seconds, fn)
     return
@@ -693,6 +861,68 @@ local function after(seconds, fn)
       fn()
     end
   end)
+end
+
+-- Control messages (ANN/REQ): AceComm when available (RAID/PARTY/GUILD or whisper).
+local outQueue = {}
+local outPumping = false
+
+local function pumpOutQueue()
+  if outPumping then
+    return
+  end
+  outPumping = true
+  local function step()
+    if #outQueue == 0 then
+      outPumping = false
+      return
+    end
+    local item = table.remove(outQueue, 1)
+    pcall(sendOne, item.prefix, item.payload, item.target)
+    after(OUT_GAP, step)
+  end
+  step()
+end
+
+local function send(kind, payload, targets)
+  if not IsInGuild() then
+    return false, "not in a guild"
+  end
+  -- Prefer AceComm: one group/guild message, or a single whisper.
+  if GmbHLootTrackerComm and GmbHLootTrackerComm.SendCommMessage then
+    if targets and #targets == 1 then
+      return aceSend(kind, payload, "WHISPER", targets[1], "NORMAL") and true or false
+    end
+    if not targets or #targets == 0 then
+      return aceSend(kind, payload, preferredDist(kind), nil, "NORMAL") and true or false
+    end
+    -- Explicit multi-target list: whisper each via AceComm (CTL-paced internally).
+    for _, target in ipairs(targets) do
+      aceSend(kind, payload, "WHISPER", target, "NORMAL")
+    end
+    return true
+  end
+
+  if #payload > 250 then
+    return false, "payload too large"
+  end
+  local prefix = (kind == "raid") and PREFIX_RAID or PREFIX_WL
+  targets = targets or shareTargets[kind]
+  if not targets or #targets == 0 then
+    targets = (kind == "raid") and listRaidSyncTargets() or listOnlineOfficers()
+  end
+  if #targets == 0 then
+    return false, (kind == "raid") and "no raid/guild targets" or "no online targets"
+  end
+  for _, target in ipairs(targets) do
+    outQueue[#outQueue + 1] = {
+      prefix = prefix,
+      payload = payload,
+      target = target,
+    }
+  end
+  pumpOutQueue()
+  return true
 end
 
 -- Peer share stays thin: only players on the wishlist (not full eligible table).
@@ -820,34 +1050,10 @@ local function encodeRaidLines(raids)
       escField(raid.bug_trio_last),
     }, "|"))
     for gi, group in ipairs(raid.groups or {}) do
-      if type(group) == "table" then
-        for si, seat in ipairs(group) do
-          if type(seat) == "table" and seat.name and tostring(seat.name) ~= "" then
-            table.insert(lines, table.concat({
-              "RGRP",
-              escField(slug),
-              tostring(gi),
-              tostring(si),
-              escField(seat.name),
-              escField(seat.class),
-              escField(seat.class_color),
-              escField(seat.role),
-            }, "|"))
-          end
-        end
-      end
+      -- Peer sync skips group roster (HUD/assignments don't need it; keeps transfers small).
     end
     for _, seat in ipairs(raid.bench or {}) do
-      if type(seat) == "table" and seat.name and tostring(seat.name) ~= "" then
-        table.insert(lines, table.concat({
-          "RBENCH",
-          escField(slug),
-          escField(seat.name),
-          escField(seat.class),
-          escField(seat.class_color),
-          escField(seat.role),
-        }, "|"))
-      end
+      -- Peer sync skips bench for the same reason.
     end
     for secIdx, section in ipairs(raid.sections or {}) do
       if type(section) == "table" then
@@ -1297,6 +1503,136 @@ local function raidsAreMemberLocked(raids)
   return any
 end
 
+-- Unlocked (officer/helper) raid sheets only — locked member copies must not become sync sources.
+function Sync.CanShareRaid()
+  return Sync.HasRaidData() and not localRaidsAreLocked()
+end
+
+local function noteOffer(kind, who, syncedAt, rev)
+  who = bareName(who)
+  if who == "" then
+    return
+  end
+  peerOffer[kind] = peerOffer[kind] or {}
+  peerOffer[kind][who] = {
+    syncedAt = tostring(syncedAt or ""),
+    rev = tostring(rev or ""),
+    at = GetTime(),
+  }
+end
+
+-- Newest syncedAt wins; equal stamps → lowest bare name (stable single sender).
+function Sync.PickSyncAuthority(kind)
+  local now = GetTime()
+  local bestName, bestSynced = nil, ""
+  local function consider(name, syncedAt)
+    name = bareName(name)
+    syncedAt = tostring(syncedAt or "")
+    if name == "" then
+      return
+    end
+    if bestName == nil then
+      bestName, bestSynced = name, syncedAt
+      return
+    end
+    if syncedAtNewer(syncedAt, bestSynced) then
+      bestName, bestSynced = name, syncedAt
+    elseif syncedAt == bestSynced and string.lower(name) < string.lower(bestName) then
+      bestName = name
+    end
+  end
+
+  local me = UnitName("player")
+  local canOffer = false
+  if kind == "wl" then
+    canOffer = Sync.CanUseWishlist() and Sync.HasWishlistData()
+    if canOffer then
+      consider(me, Sync.LocalSyncedAt())
+      noteOffer("wl", me, Sync.LocalSyncedAt(), Sync.LocalRevision())
+    end
+  else
+    canOffer = Sync.CanShareRaid()
+    if canOffer then
+      consider(me, Sync.LocalRaidSyncedAt())
+      noteOffer("raid", me, Sync.LocalRaidSyncedAt(), Sync.LocalRevision())
+    end
+  end
+
+  for name, offer in pairs(peerOffer[kind] or {}) do
+    if offer and (now - (offer.at or 0)) <= OFFER_TTL then
+      -- Raid: only unlocked offers are recorded as shareable; still rank all offers by stamp.
+      consider(name, offer.syncedAt)
+    end
+  end
+  return bestName, bestSynced
+end
+
+function Sync.IsSyncAuthority(kind)
+  local who = Sync.PickSyncAuthority(kind)
+  if not who then
+    return false
+  end
+  return namesEqual(who, UnitName("player"))
+end
+
+-- Anyone with shareable data may relay (A→B→C). Authority only gates unsolicited group blasts.
+function Sync.CanRelay(kind)
+  if kind == "wl" then
+    return Sync.CanUseWishlist() and Sync.HasWishlistData()
+  end
+  return Sync.CanShareRaid()
+end
+
+-- Authority answers first; other masters stagger so usually one REQ winner.
+local function relayReplyDelay(kind)
+  if Sync.IsSyncAuthority(kind) then
+    return 0.2
+  end
+  local me = string.lower(bareName(UnitName("player") or "z"))
+  local h = 0
+  for i = 1, #me do
+    h = h + string.byte(me, i) * i
+  end
+  return 0.85 + (h % 28) * 0.12
+end
+
+local function scheduleRelayShare(kind, toPlayer)
+  if not toPlayer or toPlayer == "" or not Sync.CanRelay(kind) then
+    return
+  end
+  local delay = relayReplyDelay(kind)
+  after(delay, function()
+    if shareBusy[kind] or not Sync.CanRelay(kind) then
+      return
+    end
+    if kind == "wl" then
+      if not Sync.SenderAllowedWishlistSync(toPlayer) then
+        return
+      end
+      Sync.Share(toPlayer, { quiet = true })
+    else
+      Sync.ShareRaid(toPlayer, { quiet = true })
+    end
+  end)
+end
+
+function Sync.SyncAuthorityStatus(kind)
+  local who, stamp = Sync.PickSyncAuthority(kind)
+  if not who then
+    return "no sync authority yet"
+  end
+  local mine = namesEqual(who, UnitName("player"))
+  local relay = Sync.CanRelay(kind)
+  return string.format(
+    "%s authority: %s%s (synced %s)%s",
+    kindLabel(kind),
+    who,
+    mine and " (you)" or "",
+    stamp ~= "" and stamp or "—",
+    relay and " · you can relay" or ""
+  )
+end
+
 -- Wishlist announce/share/request — Officer / Headmaster only.
 function Sync.Announce()
   if not Sync.CanUseWishlist() or not Sync.HasWishlistData() then
@@ -1307,16 +1643,15 @@ function Sync.Announce()
   for _ in pairs(data.wishlistByItem or {}) do
     n = n + 1
   end
-  send("wl", string.format(
-    "ANNOUNCE|%s|%s|%d",
-    tostring(data.revision or ""),
-    tostring(data.syncedAt or ""):gsub("|", ""),
-    n
-  ))
+  local synced = tostring(data.syncedAt or ""):gsub("|", "")
+  local rev = tostring(data.revision or "")
+  noteOffer("wl", UnitName("player"), synced, rev)
+  send("wl", string.format("ANNOUNCE|%s|%s|%d", rev, synced, n))
 end
 
 function Sync.AnnounceRaid()
-  if not IsInGuild() or not Sync.HasRaidData() then
+  -- Only unlocked sheets advertise as a sync source (avoids member↔officer races).
+  if not IsInGuild() or not Sync.CanShareRaid() then
     return
   end
   local data = db()
@@ -1326,12 +1661,10 @@ function Sync.AnnounceRaid()
       raidN = raidN + 1
     end
   end
-  send("raid", string.format(
-    "ANNOUNCE|%s|%s|%d",
-    tostring(data.revision or ""),
-    Sync.LocalRaidSyncedAt(),
-    raidN
-  ))
+  local synced = Sync.LocalRaidSyncedAt()
+  local rev = tostring(data.revision or "")
+  noteOffer("raid", UnitName("player"), synced, rev)
+  send("raid", string.format("ANNOUNCE|%s|%s|%d", rev, synced, raidN))
 end
 
 function Sync.Request(opts)
@@ -1380,15 +1713,17 @@ function Sync.RequestRaid(opts)
   lastReqAt.raid = now
   send("raid", "REQ|" .. Sync.LocalRevision() .. "|" .. Sync.LocalRaidSyncedAt())
   if not quiet then
-    printMsg("Requested raid sheet sync from guild…")
+    local inRaid = (IsInRaid and IsInRaid()) or (IsInGroup and IsInGroup())
+    printMsg(inRaid and "Requested raid sheet sync from the raid…" or "Requested raid sheet sync from guild…")
   end
   return true
 end
 
-local function sendBatch(kind, batches, batchIdx, rev, synced, targets)
+local function sendBatch(kind, batches, batchIdx, rev, synced, targets, onComplete)
   local blob = batches[batchIdx]
   local chunks = chunkString(blob)
   local numBatches = #batches
+  -- One recipient at a time (caller passes a single-target list).
   send(kind, string.format(
     "BEGIN|%s|%s|%d|%d|%d",
     rev,
@@ -1399,17 +1734,27 @@ local function sendBatch(kind, batches, batchIdx, rev, synced, targets)
   ), targets)
   for i, chunk in ipairs(chunks) do
     after((i - 1) * CHUNK_GAP, function()
-      -- Include batch index so the receiver never mis-routes chunks.
       send(kind, string.format("CHUNK|%d|%d|%s", batchIdx, i, chunk), targets)
     end)
   end
-  after(#chunks * CHUNK_GAP + 0.2, function()
+  after(#chunks * CHUNK_GAP + 0.25, function()
     send(kind, string.format("END|%s|%d|%d", rev, batchIdx, numBatches), targets)
     if batchIdx < numBatches then
       after(BATCH_GAP, function()
-        sendBatch(kind, batches, batchIdx + 1, rev, synced, targets)
+        sendBatch(kind, batches, batchIdx + 1, rev, synced, targets, onComplete)
       end)
-    else
+    elseif onComplete then
+      onComplete()
+    end
+  end)
+end
+
+-- Gargul lesson: don't fan-out the same bulk payload to N whispers in parallel.
+-- Finish the full transfer to target[i] before starting target[i+1].
+local function sendBatchesSerial(kind, batches, rev, synced, targets, quiet)
+  local ti = 1
+  local function nextTarget()
+    if ti > #targets then
       shareBusy[kind] = false
       shareTargets[kind] = nil
       local label = (kind == "raid") and "raid sheet" or "wishlist"
@@ -1417,16 +1762,30 @@ local function sendBatch(kind, batches, batchIdx, rev, synced, targets)
         "Shared %s with %d player(s) (%d batches, rev %s).",
         label,
         #targets,
-        numBatches,
+        #batches,
         string.sub(rev, 1, 8)
       )
-      if not shareQuiet[kind] then
+      if not quiet then
         printMsg(msg)
       end
       setSyncStatus(msg)
       shareQuiet[kind] = false
+      return
     end
-  end)
+    local one = { targets[ti] }
+    ti = ti + 1
+    setSyncStatus(string.format(
+      "sharing %s with %s (%d/%d)…",
+      kindLabel(kind),
+      tostring(one[1] or "?"),
+      ti - 1,
+      #targets
+    ), { quiet = true })
+    sendBatch(kind, batches, 1, rev, synced, one, function()
+      after(0.4, nextTarget)
+    end)
+  end
+  nextTarget()
 end
 
 function Sync.Share(toPlayer, opts)
@@ -1444,6 +1803,14 @@ function Sync.Share(toPlayer, opts)
     end
     return false
   end
+  -- Only the elected authority answers broadcast pulls (targeted share still allowed).
+  local targeted = toPlayer and tostring(toPlayer) ~= ""
+  if not targeted and not Sync.IsSyncAuthority("wl") then
+    if not quiet then
+      printMsg(Sync.SyncAuthorityStatus("wl") .. " — not sharing.")
+    end
+    return false
+  end
   if shareBusy.wl then
     if not quiet then
       printMsg("Wishlist share already in progress…")
@@ -1451,7 +1818,6 @@ function Sync.Share(toPlayer, opts)
     return false
   end
   local now = GetTime()
-  local targeted = toPlayer and tostring(toPlayer) ~= ""
   if not targeted and now - lastShareAt.wl < SHARE_COOLDOWN then
     if not quiet then
       printMsg(string.format("Share cooldown (%ds).", math.ceil(SHARE_COOLDOWN - (now - lastShareAt.wl))))
@@ -1477,16 +1843,24 @@ function Sync.Share(toPlayer, opts)
   else
     targets = listOnlineOfficers()
   end
-  if #targets == 0 then
-    if not quiet then
-      printMsg("No online officers to share with.")
-    end
-    return false
-  end
   local lines, wlCount = buildWishlistLines(data)
   if #lines == 0 then
     if not quiet then
       printMsg("Wishlist is empty — nothing to share.")
+    end
+    return false
+  end
+  if not targeted then
+    lastShareAt.wl = now
+  end
+  local rev = tostring(data.revision or "")
+  local synced = tostring(data.syncedAt or ""):gsub("|", "")
+  if GmbHLootTrackerComm and GmbHLootTrackerComm.SendCommMessage then
+    return aceSharePayload("wl", rev, synced, lines, targeted and toPlayer or nil, quiet)
+  end
+  if #targets == 0 then
+    if not quiet then
+      printMsg("No online officers to share with.")
     end
     return false
   end
@@ -1497,14 +1871,9 @@ function Sync.Share(toPlayer, opts)
     end
     return false
   end
-  if not targeted then
-    lastShareAt.wl = now
-  end
   shareBusy.wl = true
   shareQuiet.wl = quiet and true or false
   shareTargets.wl = targets
-  local rev = tostring(data.revision or "")
-  local synced = tostring(data.syncedAt or ""):gsub("|", "")
   setSyncStatus(string.format("sharing wishlist with %d officer(s)…", #targets))
   if not quiet then
     printMsg(string.format(
@@ -1514,16 +1883,25 @@ function Sync.Share(toPlayer, opts)
       #batches
     ))
   end
-  sendBatch("wl", batches, 1, rev, synced, targets)
+  sendBatchesSerial("wl", batches, rev, synced, targets, quiet)
   return true
 end
 
 function Sync.ShareRaid(toPlayer, opts)
   opts = opts or {}
   local quiet = opts.quiet
-  if not Sync.HasRaidData() then
+  if not Sync.CanShareRaid() then
     if not quiet then
-      printMsg("No raid sheet data to share. Run the Windows helper, then /reload.")
+      printMsg("No unlocked raid sheet to share (run the Windows helper).")
+    end
+    return false
+  end
+  local targeted = toPlayer and tostring(toPlayer) ~= ""
+  -- Multi-master: any unlocked copy can targeted-share / answer REQ.
+  -- Untargeted group blast stays authority-only (avoids N× AceComm storms).
+  if not targeted and not Sync.IsSyncAuthority("raid") then
+    if not quiet then
+      printMsg(Sync.SyncAuthorityStatus("raid") .. " — not broadcasting (relay via whisper/REQ still OK).")
     end
     return false
   end
@@ -1531,7 +1909,6 @@ function Sync.ShareRaid(toPlayer, opts)
     return false
   end
   local now = GetTime()
-  local targeted = toPlayer and tostring(toPlayer) ~= ""
   if not targeted and now - lastShareAt.raid < SHARE_COOLDOWN then
     return false
   end
@@ -1539,50 +1916,41 @@ function Sync.ShareRaid(toPlayer, opts)
   if type(data) ~= "table" then
     return false
   end
-  local targets = targeted and { toPlayer } or listOnlineGuildMembers()
-  if #targets == 0 then
-    return false
-  end
   local lines, raidCount = buildRaidLines(data)
   if #lines == 0 then
-    return false
-  end
-  local batches = lineBatches(lines)
-  if #batches == 0 or #batches > MAX_BATCHES then
     return false
   end
   if not targeted then
     lastShareAt.raid = now
   end
-  shareBusy.raid = true
-  shareQuiet.raid = quiet and true or false
-  shareTargets.raid = targets
   local rev = tostring(data.revision or "")
   local synced = Sync.LocalRaidSyncedAt()
-  setSyncStatus(string.format("sharing raid with %d player(s)…", #targets))
-  if not quiet then
-    printMsg(string.format(
-      "Sharing raid sheet with %d player(s) (%d lines, %d batches)…",
-      #targets,
-      raidCount,
-      #batches
-    ))
+  -- Raid sync is AceComm + LibDeflate only (Gargul-style). No BEGIN/CHUNK/END.
+  if not (GmbHLootTrackerComm and GmbHLootTrackerComm.SendCommMessage) then
+    if not quiet then
+      printMsg("Raid share needs AceComm. Update/reinstall Classic GmbH Quartermaster.")
+    end
+    return false
   end
-  sendBatch("raid", batches, 1, rev, synced, targets)
-  return true
+  if not (GmbHLootTrackerComm.CanCompress and GmbHLootTrackerComm.CanCompress()) then
+    if not quiet then
+      printMsg("Raid share needs LibDeflate. Update/reinstall Classic GmbH Quartermaster.")
+    end
+    return false
+  end
+  return aceSharePayload("raid", rev, synced, lines, targeted and toPlayer or nil, quiet)
 end
 
-local function applySync(kind, revision, syncedAt, blob, fromPlayer)
-  local raidBlob, wlBlob = splitPeerBlob(blob)
-  local raids = decodeRaidLines(raidBlob)
-  local byItem, items = decodeByItem(wlBlob)
+local requestRetry -- forward decl (used by apply paths)
+
+local function finishApply(kind, revision, syncedAt, raids, byItem, items, fromPlayer)
   local hasRaids = false
-  for _ in pairs(raids) do
+  for _ in pairs(raids or {}) do
     hasRaids = true
     break
   end
   local hasWl = false
-  for _ in pairs(byItem) do
+  for _ in pairs(byItem or {}) do
     hasWl = true
     break
   end
@@ -1604,7 +1972,6 @@ local function applySync(kind, revision, syncedAt, blob, fromPlayer)
       return
     end
     if Sync.HasRaidData() and not syncedAtNewer(syncedAt, Sync.LocalRaidSyncedAt()) then
-      -- Prefer unlocked (officer) sheets over locked member sheets at same/older stamp.
       if raidsAreMemberLocked(raids) or not localRaidsAreLocked() then
         return
       end
@@ -1618,14 +1985,15 @@ local function applySync(kind, revision, syncedAt, blob, fromPlayer)
 
   local data = beginPeerDB()
   if hasRaids then
-    data.raids = Sync.SanitizeTree(raids)
+    -- Names already fixed during decode; skip full-tree SanitizeTree (freezes Classic).
+    data.raids = raids
     data.raidSyncedAt = syncedAt
     data.raidRevision = revision
   end
   if hasWl then
-    data.wishlistByItem = Sync.SanitizeTree(byItem)
+    data.wishlistByItem = byItem
     data.items = data.items or {}
-    for id, meta in pairs(items) do
+    for id, meta in pairs(items or {}) do
       data.items[id] = data.items[id] or {}
       data.items[id].name = Sync.FixMojibake(meta.name or data.items[id].name)
     end
@@ -1641,34 +2009,336 @@ local function applySync(kind, revision, syncedAt, blob, fromPlayer)
   if hasWl then
     table.insert(bits, "wishlist")
   end
-  printMsg(string.format(
-    "Auto-synced %s from %s (rev %s). Last synced: %s",
-    table.concat(bits, "+"),
-    fromPlayer or "?",
-    string.sub(tostring(revision), 1, 8),
-    tostring(syncedAt)
-  ))
   setSyncStatus(string.format(
-    "synced %s from %s",
+    "synced %s from %s — open /gmbh to view",
     table.concat(bits, "+"),
     fromPlayer or "?"
   ), { quiet = true })
-  -- Defer heavy UI rebuild so decode/store finishes without hanging the client.
-  after(0.25, function()
-    pcall(function()
-      if GmbHLootTrackerUI and GmbHLootTrackerUI.OnDataUpdated then
-        GmbHLootTrackerUI.OnDataUpdated()
-      end
-    end)
-    setSyncStatus(string.format(
-      "synced %s from %s",
+  -- Leave UI alone (Gargul-style). Data is in SV; render only when the player opens /gmbh.
+  after(1.0, function()
+    printMsg(string.format(
+      "Auto-synced %s from %s (rev %s). Open /gmbh to load the sheet.",
       table.concat(bits, "+"),
-      fromPlayer or "?"
+      fromPlayer or "?",
+      string.sub(tostring(revision), 1, 8)
     ))
+  end)
+  -- Become a relay source so the next player can pull from us (A→B→C).
+  after(2.5, function()
+    if hasRaids and Sync.CanShareRaid() then
+      noteOffer("raid", UnitName("player"), Sync.LocalRaidSyncedAt(), Sync.LocalRevision())
+      Sync.AnnounceRaid()
+    end
+    if hasWl and Sync.CanUseWishlist() and Sync.HasWishlistData() then
+      noteOffer("wl", UnitName("player"), Sync.LocalSyncedAt(), Sync.LocalRevision())
+      Sync.Announce()
+    end
   end)
 end
 
-local function requestRetry(kind, fromPlayer, reason)
+-- Stream-decode across frames. Never build a full lines[] table (that alone freezes Classic).
+local function newRaidDecoder()
+  local raids = {}
+  local MAX_GROUP, MAX_SEAT, MAX_SEC, MAX_BOARD, MAX_SLOTS = 8, 5, 40, 40, 80
+  local function ensureRaid(slug)
+    local r = raids[slug]
+    if not r then
+      r = {
+        raid_slug = slug,
+        groups = {},
+        bench = {},
+        assignments = {},
+        sections = {},
+        has_sheet = false,
+      }
+      raids[slug] = r
+    end
+    return r
+  end
+  local function ensureGroup(raid, gi)
+    if gi < 1 or gi > MAX_GROUP then return nil end
+    while #(raid.groups) < gi do table.insert(raid.groups, {}) end
+    return raid.groups[gi]
+  end
+  local function ensureSection(raid, secIdx)
+    if secIdx < 1 or secIdx > MAX_SEC then return nil end
+    while #(raid.sections) < secIdx do
+      table.insert(raid.sections, { id = "", label = "", boards = {} })
+    end
+    return raid.sections[secIdx]
+  end
+  local function ensureBoard(section, boardIdx)
+    if not section or boardIdx < 1 or boardIdx > MAX_BOARD then return nil end
+    section.boards = section.boards or {}
+    while #(section.boards) < boardIdx do
+      table.insert(section.boards, { id = "", label = "", slots = {} })
+    end
+    return section.boards[boardIdx]
+  end
+  -- No FixMojibake here — too expensive on the apply path.
+  local function feedLine(line)
+    local fields = splitPipe(line)
+    local rowKind, slug = fields[1], fields[2]
+    if not rowKind or not slug or slug == "" then return end
+    local raid = ensureRaid(slug)
+    if rowKind == "RMETA" then
+      raid.title = fields[3] ~= "" and fields[3] or nil
+      raid.event_start_at = fields[4] ~= "" and fields[4] or nil
+      raid.version = fields[5] ~= "" and fields[5] or nil
+      raid.updated_at = fields[6] ~= "" and fields[6] or nil
+      raid.announced = fields[7] == "1"
+      raid.has_sheet = fields[8] == "1"
+      raid.member_locked = fields[9] == "1"
+      raid.bug_trio_last = fields[10] ~= "" and fields[10] or nil
+    elseif rowKind == "RGRP" then
+      local gi, si = tonumber(fields[3]) or 1, tonumber(fields[4]) or 1
+      if si >= 1 and si <= MAX_SEAT then
+        local group = ensureGroup(raid, gi)
+        if group then
+          while #group < si do table.insert(group, nil) end
+          group[si] = {
+            name = fields[5],
+            class = fields[6] ~= "" and fields[6] or nil,
+            class_color = fields[7] ~= "" and fields[7] or nil,
+            role = fields[8] ~= "" and fields[8] or nil,
+          }
+        end
+      end
+    elseif rowKind == "RBENCH" then
+      if #(raid.bench) < 80 then
+        table.insert(raid.bench, {
+          name = fields[3],
+          class = fields[4] ~= "" and fields[4] or nil,
+          class_color = fields[5] ~= "" and fields[5] or nil,
+          role = fields[6] ~= "" and fields[6] or nil,
+        })
+      end
+    elseif rowKind == "RSEC" then
+      local section = ensureSection(raid, tonumber(fields[3]) or 1)
+      if section then
+        section.id = fields[4] or ""
+        section.label = fields[5] or ""
+        section.kind = fields[6] ~= "" and fields[6] or nil
+        section.map_layout = fields[7] ~= "" and fields[7] or nil
+        section.boards = section.boards or {}
+      end
+    elseif rowKind == "RBOARD" then
+      local section = ensureSection(raid, tonumber(fields[3]) or 1)
+      local board = ensureBoard(section, tonumber(fields[4]) or 1)
+      if board then
+        board.id = fields[5] or ""
+        board.label = fields[6] or ""
+        board.mark = fields[7] ~= "" and fields[7] or nil
+        board.mob = fields[8] ~= "" and fields[8] or nil
+        board.slots = board.slots or {}
+      end
+    elseif rowKind == "RSLOT" then
+      local section = ensureSection(raid, tonumber(fields[3]) or 1)
+      local board = ensureBoard(section, tonumber(fields[4]) or 1)
+      if board then
+        board.slots = board.slots or {}
+        if #(board.slots) < MAX_SLOTS then
+          local slot = {
+            id = fields[5],
+            label = fields[6] ~= "" and fields[6] or fields[5],
+            mark = fields[7] ~= "" and fields[7] or nil,
+            player_name = fields[8] ~= "" and fields[8] or nil,
+            class = fields[9] ~= "" and fields[9] or nil,
+            class_color = fields[10] ~= "" and fields[10] or nil,
+            role = fields[11] ~= "" and fields[11] or nil,
+          }
+          if fields[12] and fields[12] ~= "" then slot.x = tonumber(fields[12]) or fields[12] end
+          if fields[13] and fields[13] ~= "" then slot.y = tonumber(fields[13]) or fields[13] end
+          if fields[14] and fields[14] ~= "" then slot.ring = fields[14] end
+          if fields[15] and fields[15] ~= "" then slot.fixed = fields[15] end
+          table.insert(board.slots, slot)
+        end
+      end
+    elseif rowKind == "RASN" then
+      if #(raid.assignments) < 400 then
+        table.insert(raid.assignments, {
+          slot_id = fields[3],
+          label = fields[4],
+          section_label = fields[5],
+          board_label = fields[6],
+          mark = fields[7] ~= "" and fields[7] or nil,
+          player_name = fields[8] ~= "" and fields[8] or nil,
+          class = fields[9] ~= "" and fields[9] or nil,
+          class_color = fields[10] ~= "" and fields[10] or nil,
+          role = fields[11] ~= "" and fields[11] or nil,
+        })
+        raid.has_sheet = true
+      end
+    end
+  end
+  return raids, feedLine
+end
+
+local function skipRaidHeader(line)
+  return line == "" or line == "#RAID" or line == "#WL"
+end
+
+-- Decode raid lines from a single blob across frames (AceComm path).
+local function applySyncAsync(kind, revision, syncedAt, blob, fromPlayer)
+  setSyncStatus("applying " .. kindLabel(kind) .. "…", { quiet = true })
+  blob = blob or ""
+
+  if kind == "wl" then
+    after(0.3, function()
+      local _, wlBlob = splitPeerBlob(blob)
+      local byItem, items = decodeByItem(wlBlob)
+      finishApply(kind, revision, syncedAt, {}, byItem, items, fromPlayer)
+    end)
+    return
+  end
+
+  -- Prefer #RAID body if present; otherwise treat whole blob as raid lines.
+  local raidBlob = blob
+  local raidStart = string.find(blob, "#RAID\n", 1, true)
+  if raidStart then
+    local afterHdr = raidStart + 6
+    local wlStart = string.find(blob, "\n#WL\n", afterHdr, true)
+    if wlStart then
+      raidBlob = string.sub(blob, afterHdr, wlStart - 1)
+    else
+      raidBlob = string.sub(blob, afterHdr)
+    end
+  end
+
+  local raids, feedLine = newRaidDecoder()
+  local pos, len = 1, #raidBlob
+  local f = CreateFrame("Frame")
+  f:SetScript("OnUpdate", function(self)
+    local budget = APPLY_LINES_PER_FRAME
+    while budget > 0 and pos <= len do
+      local nl = string.find(raidBlob, "\n", pos, true)
+      local line
+      if nl then
+        line = string.sub(raidBlob, pos, nl - 1)
+        pos = nl + 1
+      else
+        line = string.sub(raidBlob, pos)
+        pos = len + 1
+      end
+      if not skipRaidHeader(line) then
+        local ok, err = pcall(feedLine, line)
+        if not ok then
+          self:SetScript("OnUpdate", nil)
+          requestRetry(kind, fromPlayer, "Sync apply failed — retrying… (" .. tostring(err) .. ")")
+          return
+        end
+      end
+      budget = budget - 1
+    end
+    if pos > len then
+      self:SetScript("OnUpdate", nil)
+      local ok, err = pcall(finishApply, kind, revision, syncedAt, raids, {}, {}, fromPlayer)
+      if not ok then
+        requestRetry(kind, fromPlayer, "Sync apply failed — retrying… (" .. tostring(err) .. ")")
+      end
+    end
+  end)
+end
+
+-- CHUNK path: stream chunks → lines without ever concatenating the full payload.
+local function applyRaidFromBatches(revision, syncedAt, batches, numBatches, fromPlayer)
+  setSyncStatus("applying raid…", { quiet = true })
+  local raids, feedLine = newRaidDecoder()
+  local bIdx, pIdx = 1, 1
+  local carry = ""
+  local needBatchSep = false
+  local f = CreateFrame("Frame")
+  f:SetScript("OnUpdate", function(self)
+    local budget = APPLY_LINES_PER_FRAME
+    while budget > 0 do
+      -- Flush remaining carry when all chunks are consumed.
+      if bIdx > numBatches then
+        if carry ~= "" then
+          if not skipRaidHeader(carry) then
+            local ok, err = pcall(feedLine, carry)
+            if not ok then
+              self:SetScript("OnUpdate", nil)
+              requestRetry("raid", fromPlayer, "Sync apply failed — retrying… (" .. tostring(err) .. ")")
+              return
+            end
+          end
+          carry = ""
+        end
+        self:SetScript("OnUpdate", nil)
+        for b = 1, numBatches do
+          if batches[b] then
+            batches[b].parts = nil
+          end
+        end
+        local ok, err = pcall(finishApply, "raid", revision, syncedAt, raids, {}, {}, fromPlayer)
+        if not ok then
+          requestRetry("raid", fromPlayer, "Sync apply failed — retrying… (" .. tostring(err) .. ")")
+        end
+        return
+      end
+
+      local batch = batches[bIdx]
+      if not batch or type(batch.parts) ~= "table" then
+        self:SetScript("OnUpdate", nil)
+        requestRetry("raid", fromPlayer, "Sync incomplete — missing batch " .. bIdx)
+        return
+      end
+      if pIdx > (tonumber(batch.total) or 0) then
+        bIdx = bIdx + 1
+        pIdx = 1
+        needBatchSep = true
+      else
+        local piece = batch.parts[pIdx]
+        batch.parts[pIdx] = nil
+        pIdx = pIdx + 1
+        if piece == nil then
+          self:SetScript("OnUpdate", nil)
+          requestRetry("raid", fromPlayer, "Sync incomplete — missing chunk in batch " .. bIdx)
+          return
+        end
+        local text = carry
+        if needBatchSep then
+          text = text .. "\n"
+          needBatchSep = false
+        end
+        text = text .. piece
+        carry = ""
+        local pos = 1
+        local tlen = #text
+        while budget > 0 and pos <= tlen do
+          local nl = string.find(text, "\n", pos, true)
+          if not nl then
+            carry = string.sub(text, pos)
+            break
+          end
+          local line = string.sub(text, pos, nl - 1)
+          pos = nl + 1
+          if not skipRaidHeader(line) then
+            local ok, err = pcall(feedLine, line)
+            if not ok then
+              self:SetScript("OnUpdate", nil)
+              requestRetry("raid", fromPlayer, "Sync apply failed — retrying… (" .. tostring(err) .. ")")
+              return
+            end
+            budget = budget - 1
+          end
+        end
+        if budget == 0 and pos <= tlen then
+          carry = string.sub(text, pos)
+        end
+      end
+    end
+  end)
+end
+
+local function applySync(kind, revision, syncedAt, blob, fromPlayer)
+  -- Always leave the CHAT_MSG_ADDON / AceComm stack before touching the blob.
+  after(0.75, function()
+    applySyncAsync(kind, revision, syncedAt, blob, fromPlayer)
+  end)
+end
+
+requestRetry = function(kind, fromPlayer, reason)
   pending[kind] = nil
   if reason then
     printMsg(reason)
@@ -1702,38 +2372,57 @@ local function tryFinishPending(kind)
       return
     end
   end
-  local buf = {}
-  for b = 1, pend.numBatches do
-    local batch = pend.batches[b]
-    local parts = {}
-    for i = 1, batch.total do
-      if not batch.parts[i] then
-        requestRetry(kind, pend.from, "Sync incomplete — missing chunk " .. i .. " in batch " .. b)
-        return
-      end
-      parts[i] = batch.parts[i]
-    end
-    buf[b] = table.concat(parts)
-  end
-  local blob = table.concat(buf, "\n")
   local fromPlayer = pend.from
   local revision = pend.revision
   local syncedAt = pend.syncedAt
+  local batches = pend.batches
+  local numBatches = pend.numBatches
   pending[kind] = nil
-  -- Apply off the addon-message thread so the client can breathe after the last END.
   setSyncStatus("applying " .. kindLabel(kind) .. "…", { quiet = true })
-  after(0.2, function()
-    local ok, err = pcall(function()
-      applySync(kind, revision, syncedAt, blob, fromPlayer)
+
+  if kind == "raid" then
+    -- Never table.concat the full raid payload — stream chunks on later frames.
+    after(1.25, function()
+      applyRaidFromBatches(revision, syncedAt, batches, numBatches, fromPlayer)
     end)
-    if not ok then
-      requestRetry(kind, fromPlayer, "Sync apply failed — retrying… (" .. tostring(err) .. ")")
-    end
+    return
+  end
+
+  -- Wishlist is small; concat one batch per frame then apply.
+  after(1.0, function()
+    local buf = {}
+    local b = 1
+    local f = CreateFrame("Frame")
+    f:SetScript("OnUpdate", function(self)
+      if b > numBatches then
+        self:SetScript("OnUpdate", nil)
+        applySync(kind, revision, syncedAt, table.concat(buf, "\n"), fromPlayer)
+        return
+      end
+      local batch = batches[b]
+      if not batch then
+        self:SetScript("OnUpdate", nil)
+        requestRetry(kind, fromPlayer, "Sync incomplete — missing batch " .. b)
+        return
+      end
+      local parts = {}
+      for i = 1, batch.total do
+        if not batch.parts[i] then
+          self:SetScript("OnUpdate", nil)
+          requestRetry(kind, fromPlayer, "Sync incomplete — missing chunk " .. i .. " in batch " .. b)
+          return
+        end
+        parts[i] = batch.parts[i]
+        batch.parts[i] = nil
+      end
+      buf[b] = table.concat(parts)
+      b = b + 1
+    end)
   end)
 end
 
 local function onKindAddonMessage(kind, message, channel, sender)
-  if channel ~= "WHISPER" then
+  if channel ~= "WHISPER" and channel ~= "RAID" and channel ~= "PARTY" and channel ~= "GUILD" then
     return
   end
   local me = UnitName("player")
@@ -1766,6 +2455,44 @@ local function onKindAddonMessage(kind, message, channel, sender)
     return
   end
 
+  -- AceComm bulk payload. SYNCZ = LibDeflate (preferred); SYNC = legacy plaintext.
+  if cmd == "SYNCZ" or cmd == "SYNC" then
+    local rev, synced, wire = rest:match("^([^|]*)|([^\n]*)\n(.*)$")
+    if not rev or not wire then
+      return
+    end
+    setSyncStatus(string.format(
+      "receiving %s from %s (AceComm%s)…",
+      kindLabel(kind),
+      tostring(sender or "?"),
+      cmd == "SYNCZ" and "+Deflate" or ""
+    ), { quiet = true })
+    -- Leave AceComm reassembly frame before decompress/apply.
+    after(1.0, function()
+      local blob = wire
+      if cmd == "SYNCZ" then
+        local Comm = GmbHLootTrackerComm
+        if not (Comm and Comm.Decompress) then
+          printMsg("Received compressed sync but LibDeflate is missing — update the addon.")
+          return
+        end
+        blob = Comm.Decompress(wire)
+        if not blob then
+          printMsg("Failed to decompress sync from " .. tostring(sender or "?"))
+          return
+        end
+      end
+      printMsg(string.format(
+        "Receiving %s from %s via AceComm%s…",
+        kind == "raid" and "raid sheet" or "wishlist",
+        sender or "?",
+        cmd == "SYNCZ" and "+Deflate" or ""
+      ))
+      applySync(kind, rev, synced, blob, sender)
+    end)
+    return
+  end
+
   local hasData = (kind == "wl") and Sync.HasWishlistData() or Sync.HasRaidData()
   local localRev = Sync.LocalRevision()
   local localSynced = (kind == "wl") and Sync.LocalSyncedAt() or Sync.LocalRaidSyncedAt()
@@ -1776,6 +2503,7 @@ local function onKindAddonMessage(kind, message, channel, sender)
       rev = rest:match("^([^|]*)|") or rest
       peerSynced = ""
     end
+    noteOffer(kind, sender, peerSynced, rev)
     if not hasData or syncedAtNewer(peerSynced, localSynced)
       or (peerSynced == "" and rev and rev ~= "" and rev ~= localRev)
     then
@@ -1784,22 +2512,18 @@ local function onKindAddonMessage(kind, message, channel, sender)
         send(kind, "REQ|" .. localRev .. "|" .. localSynced, { sender })
       end
     elseif hasData
+      and Sync.CanRelay(kind)
       and rev and rev ~= "" and rev ~= localRev
       and syncedAtNewer(localSynced, peerSynced)
     then
-      if kind == "wl" then
-        if Sync.SenderAllowedWishlistSync(sender) then
-          Sync.Share(sender, { quiet = true })
-        end
-      else
-        Sync.ShareRaid(sender, { quiet = true })
-      end
+      -- Multi-master: any relay with newer data can push (staggered).
+      scheduleRelayShare(kind, sender)
     end
     return
   end
 
   if cmd == "REQ" then
-    if hasData and not shareBusy[kind] then
+    if hasData and Sync.CanRelay(kind) and not shareBusy[kind] then
       local theirRev, theirSynced = rest:match("^([^|]*)|?(.*)$")
       theirRev = theirRev or ""
       theirSynced = theirSynced or ""
@@ -1809,15 +2533,8 @@ local function onKindAddonMessage(kind, message, channel, sender)
       if theirRev == localRev and (theirSynced == "" or theirSynced == localSynced) then
         return
       end
-      if kind == "wl" then
-        -- Re-check guild roster / rank before answering a wishlist pull.
-        if not Sync.SenderAllowedWishlistSync(sender) then
-          return
-        end
-        Sync.Share(sender, { quiet = true })
-      else
-        Sync.ShareRaid(sender, { quiet = true })
-      end
+      -- Multi-master REQ answer (authority first, others staggered).
+      scheduleRelayShare(kind, sender)
     end
     return
   end
@@ -1843,6 +2560,25 @@ local function onKindAddonMessage(kind, message, channel, sender)
       return
     end
     local pend = pending[kind]
+    -- Another sender mid-transfer: keep newer stamp, otherwise ignore interloper.
+    if pend and pend.from and not namesEqual(pend.from, sender) then
+      local incomplete = false
+      for b = 1, pend.numBatches or 0 do
+        local batch = pend.batches and pend.batches[b]
+        if not batch or not batch.done then
+          incomplete = true
+          break
+        end
+      end
+      if incomplete then
+        if syncedAtNewer(synced, pend.syncedAt) then
+          pending[kind] = nil
+          pend = nil
+        else
+          return
+        end
+      end
+    end
     if not pend
       or pend.revision ~= rev
       or pend.from ~= sender
@@ -1895,7 +2631,7 @@ local function onKindAddonMessage(kind, message, channel, sender)
 
   if cmd == "CHUNK" then
     local pend = pending[kind]
-    if not pend then
+    if not pend or (pend.from and not namesEqual(pend.from, sender)) then
       return
     end
     -- New: CHUNK|batchIdx|chunkIdx|data  Old: CHUNK|chunkIdx|data
@@ -1928,7 +2664,7 @@ local function onKindAddonMessage(kind, message, channel, sender)
 
   if cmd == "END" then
     local pend = pending[kind]
-    if not pend then
+    if not pend or (pend.from and not namesEqual(pend.from, sender)) then
       return
     end
     local rev, batchIdx, numBatches = rest:match("^([^|]*)|(%d+)|(%d+)$")
@@ -1943,7 +2679,7 @@ local function onKindAddonMessage(kind, message, channel, sender)
     end
     local batch = pend.batches[batchIdx]
     if not batch then
-      requestRetry(kind, pend.from, "Sync incomplete — END for unknown batch " .. tostring(batchIdx))
+      -- Silent: usually a discarded interloper END.
       return
     end
     for i = 1, batch.total do
@@ -1986,9 +2722,22 @@ local function onAddonMessage(prefix, message, channel, sender)
 end
 
 function Sync.Register()
-  if C_ChatInfo and C_ChatInfo.RegisterAddonMessagePrefix then
+  local Comm = GmbHLootTrackerComm
+  if Comm and Comm.RegisterComm then
+    local function onComm(prefix, message, distribution, sender)
+      if prefix == PREFIX_WL then
+        onKindAddonMessage("wl", message, distribution, sender)
+      elseif prefix == PREFIX_RAID then
+        onKindAddonMessage("raid", message, distribution, sender)
+      end
+    end
+    Comm:RegisterComm(PREFIX_WL, onComm)
+    Comm:RegisterComm(PREFIX_RAID, onComm)
+  elseif C_ChatInfo and C_ChatInfo.RegisterAddonMessagePrefix then
     C_ChatInfo.RegisterAddonMessagePrefix(PREFIX_WL)
     C_ChatInfo.RegisterAddonMessagePrefix(PREFIX_RAID)
+  end
+  if C_ChatInfo and C_ChatInfo.RegisterAddonMessagePrefix then
     C_ChatInfo.RegisterAddonMessagePrefix(PRESENCE_PREFIX)
   end
   if GuildRoster then
@@ -2004,7 +2753,6 @@ function Sync.Register()
   end
 
   local function runAutoSync()
-    -- Wishlist: officers / headmasters only.
     if Sync.CanUseWishlist() then
       if Sync.HasWishlistData() then
         Sync.Announce()
@@ -2012,11 +2760,13 @@ function Sync.Register()
         Sync.Request({ quiet = true })
       end
     end
-    -- Raid sheets: any guild member.
     if IsInGuild and IsInGuild() then
-      if Sync.HasRaidData() then
+      if Sync.CanShareRaid() then
         Sync.AnnounceRaid()
+      elseif not Sync.HasRaidData() then
+        Sync.RequestRaid({ quiet = true })
       else
+        -- Locked member sheet only: pull newer unlocked data, never announce as source.
         Sync.RequestRaid({ quiet = true })
       end
     end
@@ -2040,7 +2790,13 @@ function Sync.Register()
 
   f:SetScript("OnEvent", function(_, event, ...)
     if event == "CHAT_MSG_ADDON" then
-      onAddonMessage(...)
+      local prefix, message, channel, sender = ...
+      -- AceComm owns GMBHWL / GMBHRS; only presence (and legacy fallback) here.
+      if prefix == PRESENCE_PREFIX then
+        onPresenceMessage(prefix, message, channel, sender)
+      elseif not (GmbHLootTrackerComm and GmbHLootTrackerComm.SendCommMessage) then
+        onAddonMessage(prefix, message, channel, sender)
+      end
     elseif event == "PLAYER_ENTERING_WORLD" or event == "PLAYER_GUILD_UPDATE" then
       if GuildRoster then
         GuildRoster()

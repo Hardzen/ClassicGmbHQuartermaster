@@ -2,11 +2,13 @@
 ## Title: Classic GmbH Quartermaster
 ## Notes: Raid sheet bosses/assignments (all ranks) + officer wishlist + peer sync.
 ## Author: Classic GmbH
-## Version: 1.8.26
+## Version: 1.8.35
 ## SavedVariables: GmbHLootTrackerDB
 ## SavedVariablesPerCharacter: GmbHLootTrackerCharDB
 
+Libs\libs.xml
 HelperData.lua
+GmbHLootTrackerComm.lua
 GmbHLootTrackerSync.lua
 GmbHLootTracker.lua
 GmbHLootTrackerRaidSheet.lua

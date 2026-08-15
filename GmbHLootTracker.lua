@@ -881,14 +881,8 @@ function UI:RefreshSyncLabel()
 end
 
 function UI.OnDataUpdated()
-  if UI.frame and UI.frame:IsShown() then
-    UI:RefreshSyncLabel()
-    if UI.mainTab == "raid" then
-      UI:RenderRaidSheet()
-    elseif UI.selectedItemId then
-      UI:RenderCandidates()
-    end
-  end
+  -- Sync must never touch widgets. Sheet/wishlist render only when the player opens /gmbh.
+  UI._dataDirty = true
 end
 
 function UI:EmptyHint()
@@ -2853,10 +2847,12 @@ end
 
 function UI:Show()
   self:Create()
+  self._dataDirty = false
   self:RefreshSyncLabel()
   self.frame:Show()
   self.raidViewUserPinned = false
   -- Default: raid sheet for everyone. Wishlist is opt-in via tab.
+  -- Always rebuild from current DB here — this is the only place sync data is painted.
   self:SetMainTab(self.mainTab or "raid")
 end
 
@@ -3174,6 +3170,12 @@ local function cmdStatus()
   else
     printMsg("Sync status: idle")
   end
+  if GmbHLootTrackerSync and GmbHLootTrackerSync.SyncAuthorityStatus then
+    printMsg(GmbHLootTrackerSync.SyncAuthorityStatus("raid"))
+    if GmbHLootTrackerSync.CanUseWishlist and GmbHLootTrackerSync.CanUseWishlist() then
+      printMsg(GmbHLootTrackerSync.SyncAuthorityStatus("wl"))
+    end
+  end
   if UI.frame and UI.RefreshSyncLabel then
     UI:RefreshSyncLabel()
   end
@@ -3389,14 +3391,7 @@ boot:SetScript("OnEvent", function(_, event, arg1)
   end
   if event == "ADDON_LOADED" then
     -- Prefer HelperData; do not copy into SV (SV nil load must not matter).
-    if GmbHLootTrackerSync and GmbHLootTrackerSync.SanitizeTree then
-      if type(GmbHLootTrackerHelperData) == "table" then
-        GmbHLootTrackerSync.SanitizeTree(GmbHLootTrackerHelperData)
-      end
-      if type(GmbHLootTrackerDB) == "table" then
-        GmbHLootTrackerSync.SanitizeTree(GmbHLootTrackerDB)
-      end
-    end
+    -- Do not SanitizeTree(HelperData) here — a full walk freezes Classic on large sheets.
     debugHelperState()
     return
   end
