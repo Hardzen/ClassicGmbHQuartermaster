@@ -1673,20 +1673,38 @@ function UI:GetPersonalBossAssignmentLines()
   return self:CollectPersonalAssignments(section), label, false
 end
 
+-- UI prefs (HUD position, etc.) live in per-character SV so they survive reload
+-- even when account SV is nil / overwritten by peer sync data.
+local function charDB()
+  if type(GmbHLootTrackerCharDB) ~= "table" then
+    GmbHLootTrackerCharDB = {}
+  end
+  -- One-time migrate from older account-SV location.
+  if GmbHLootTrackerCharDB.assignHud == nil
+    and type(GmbHLootTrackerDB) == "table"
+    and type(GmbHLootTrackerDB.assignHud) == "table"
+  then
+    GmbHLootTrackerCharDB.assignHud = GmbHLootTrackerDB.assignHud
+  end
+  return GmbHLootTrackerCharDB
+end
+
 local function saveAssignHudPosition(frame)
   if not frame then
     return
   end
-  if type(GmbHLootTrackerDB) ~= "table" then
-    GmbHLootTrackerDB = {}
-  end
-  -- Normalize to UIParent after a drag — raw GetPoint() can be relative to a
-  -- transient frame and then appear to "reset" on the next refresh/reload.
+  local dbChar = charDB()
+  local prev = type(dbChar.assignHud) == "table" and dbChar.assignHud or nil
+  -- Prefer screen coords while visible. Hidden frames often report nil GetLeft/GetTop
+  -- on Classic — never overwrite a good saved position with defaults in that case.
   local left = frame:GetLeft()
   local top = frame:GetTop()
   if left and top then
     frame:ClearAllPoints()
     frame:SetPoint("TOPLEFT", UIParent, "BOTTOMLEFT", left, top)
+  elseif prev and prev.x ~= nil and prev.y ~= nil then
+    left = tonumber(prev.x) or 0
+    top = tonumber(prev.y) or 180
   else
     local point, _, relPoint, x, y = frame:GetPoint(1)
     left = x or 0
@@ -1694,7 +1712,7 @@ local function saveAssignHudPosition(frame)
     frame:ClearAllPoints()
     frame:SetPoint(point or "TOPLEFT", UIParent, relPoint or "BOTTOMLEFT", left, top)
   end
-  GmbHLootTrackerDB.assignHud = {
+  dbChar.assignHud = {
     point = "TOPLEFT",
     relPoint = "BOTTOMLEFT",
     x = left,
@@ -1707,7 +1725,7 @@ local function applyAssignHudPosition(frame)
   if not frame then
     return
   end
-  local saved = type(GmbHLootTrackerDB) == "table" and GmbHLootTrackerDB.assignHud
+  local saved = charDB().assignHud
   frame:ClearAllPoints()
   if type(saved) == "table" and saved.x ~= nil and saved.y ~= nil then
     frame:SetPoint(
@@ -1732,7 +1750,8 @@ function UI:EnsureAssignHud()
   f:SetFrameStrata("MEDIUM")
   f:SetClampedToScreen(true)
   f:SetMovable(true)
-  f:SetUserPlaced(true)
+  -- Do not use SetUserPlaced — Classic layout cache fights addon-saved SetPoint.
+  f:SetUserPlaced(false)
   f:EnableMouse(true)
   f:RegisterForDrag("LeftButton")
   f:SetScript("OnDragStart", function(selfFrame)
@@ -1764,8 +1783,8 @@ function UI:EnsureAssignHud()
   f.close:SetPoint("TOPRIGHT", 2, 2)
   f.close:SetScript("OnClick", function()
     f._userHidden = true
-    f:Hide()
     saveAssignHudPosition(f)
+    f:Hide()
   end)
 
   local scroll = CreateFrame("ScrollFrame", nil, f)
@@ -1827,6 +1846,8 @@ function UI:RefreshAssignHud()
     f:Hide()
     return
   end
+  -- Keep screen position across SetWidth/SetHeight (Classic can drop anchors).
+  local keepLeft, keepTop = f:GetLeft(), f:GetTop()
   local title = bossLabel and shortBossTitle(bossLabel) or "Assignment"
   if self.hudTestBoss then
     title = title .. "  ·  test"
@@ -1871,6 +1892,13 @@ function UI:RefreshAssignHud()
   if f.scroll then
     f.scroll:SetVerticalScroll(0)
   end
+  if keepLeft and keepTop then
+    f:ClearAllPoints()
+    f:SetPoint("TOPLEFT", UIParent, "BOTTOMLEFT", keepLeft, keepTop)
+  elseif not f._posApplied then
+    applyAssignHudPosition(f)
+    f._posApplied = true
+  end
   f:Show()
 end
 
@@ -1878,11 +1906,12 @@ function UI:ToggleAssignHud()
   local f = self:EnsureAssignHud()
   if f:IsShown() then
     f._userHidden = true
-    f:Hide()
     saveAssignHudPosition(f)
+    f:Hide()
     printMsg("Assignment HUD hidden. /gmbh hud to show again.")
   else
     f._userHidden = false
+    f._posApplied = false
     saveAssignHudPosition(f)
     self:RefreshAssignHud()
     if not f:IsShown() then
@@ -3360,6 +3389,14 @@ boot:SetScript("OnEvent", function(_, event, arg1)
   end
   if event == "ADDON_LOADED" then
     -- Prefer HelperData; do not copy into SV (SV nil load must not matter).
+    if GmbHLootTrackerSync and GmbHLootTrackerSync.SanitizeTree then
+      if type(GmbHLootTrackerHelperData) == "table" then
+        GmbHLootTrackerSync.SanitizeTree(GmbHLootTrackerHelperData)
+      end
+      if type(GmbHLootTrackerDB) == "table" then
+        GmbHLootTrackerSync.SanitizeTree(GmbHLootTrackerDB)
+      end
+    end
     debugHelperState()
     return
   end
@@ -3372,6 +3409,16 @@ boot:SetScript("OnEvent", function(_, event, arg1)
   hookShiftClickItemLinks()
   UI:Create()
   UI:RefreshAssignHud()
+  -- Layout is fully ready one frame later; re-pin HUD if SV position exists.
+  if C_Timer and C_Timer.After then
+    C_Timer.After(0, function()
+      if UI.assignHud and not UI.assignHud._dragging then
+        applyAssignHudPosition(UI.assignHud)
+        UI.assignHud._posApplied = true
+        UI:RefreshAssignHud()
+      end
+    end)
+  end
   local data = db()
   if type(data) == "table" and data.syncedAt then
     printMsg("Helper data ready. /gmbh opens Raid sheet (all) + Wishlist (officers).")

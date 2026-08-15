@@ -22,6 +22,107 @@ local AUTO_SYNC_GAP = 90
 GmbHLootTrackerSync = GmbHLootTrackerSync or {}
 local Sync = GmbHLootTrackerSync
 
+-- Repair UTF-8 mojibake (ê stored as Ãª) from double-encoded HelperData / peer sync.
+local function utf8Codepoints(s)
+  local i, n = 1, #s
+  local cps = {}
+  while i <= n do
+    local c = string.byte(s, i)
+    if not c then
+      return nil
+    end
+    if c < 0x80 then
+      cps[#cps + 1] = c
+      i = i + 1
+    elseif c < 0xE0 and i + 1 <= n then
+      local c2 = string.byte(s, i + 1)
+      if not c2 or c2 < 0x80 or c2 > 0xBF then
+        return nil
+      end
+      cps[#cps + 1] = (c - 0xC0) * 0x40 + (c2 - 0x80)
+      i = i + 2
+    elseif c < 0xF0 and i + 2 <= n then
+      local c2, c3 = string.byte(s, i + 1, i + 2)
+      if not c2 or not c3 or c2 < 0x80 or c2 > 0xBF or c3 < 0x80 or c3 > 0xBF then
+        return nil
+      end
+      cps[#cps + 1] = (c - 0xE0) * 0x1000 + (c2 - 0x80) * 0x40 + (c3 - 0x80)
+      i = i + 3
+    elseif c < 0xF8 and i + 3 <= n then
+      local c2, c3, c4 = string.byte(s, i + 1, i + 3)
+      if not c2 or not c3 or not c4
+        or c2 < 0x80 or c2 > 0xBF or c3 < 0x80 or c3 > 0xBF or c4 < 0x80 or c4 > 0xBF
+      then
+        return nil
+      end
+      cps[#cps + 1] = (c - 0xF0) * 0x40000 + (c2 - 0x80) * 0x1000 + (c3 - 0x80) * 0x40 + (c4 - 0x80)
+      i = i + 4
+    else
+      return nil
+    end
+  end
+  return cps
+end
+
+function Sync.FixMojibake(s)
+  if type(s) ~= "string" or s == "" then
+    return s
+  end
+  -- Fast path: mojibake almost always contains UTF-8 for Ã (C3 83) or Â (C3 82).
+  if not string.find(s, "\195\131", 1, true) and not string.find(s, "\195\130", 1, true) then
+    return s
+  end
+  local cur = s
+  for _ = 1, 3 do
+    local cps = utf8Codepoints(cur)
+    if not cps then
+      break
+    end
+    local looks, allLatin = false, true
+    for _, cp in ipairs(cps) do
+      if cp > 255 then
+        allLatin = false
+        break
+      end
+      if cp == 0xC3 or cp == 0xC2 then
+        looks = true
+      end
+    end
+    if not allLatin or not looks then
+      break
+    end
+    local parts = {}
+    for _, cp in ipairs(cps) do
+      parts[#parts + 1] = string.char(cp)
+    end
+    local nxt = table.concat(parts)
+    if nxt == cur or not utf8Codepoints(nxt) then
+      break
+    end
+    cur = nxt
+  end
+  return cur
+end
+
+function Sync.SanitizeTree(obj, seen)
+  if type(obj) ~= "table" then
+    return obj
+  end
+  seen = seen or {}
+  if seen[obj] then
+    return obj
+  end
+  seen[obj] = true
+  for k, v in pairs(obj) do
+    if type(v) == "string" then
+      obj[k] = Sync.FixMojibake(v)
+    elseif type(v) == "table" then
+      Sync.SanitizeTree(v, seen)
+    end
+  end
+  return obj
+end
+
 -- Guild ranks that may open wishlist + participate in wishlist peer sync.
 -- Matches Classic GmbH roster ranks (Officer, Headmaster, …).
 Sync.WISHLIST_RANKS = {
@@ -1517,16 +1618,16 @@ local function applySync(kind, revision, syncedAt, blob, fromPlayer)
 
   local data = beginPeerDB()
   if hasRaids then
-    data.raids = raids
+    data.raids = Sync.SanitizeTree(raids)
     data.raidSyncedAt = syncedAt
     data.raidRevision = revision
   end
   if hasWl then
-    data.wishlistByItem = byItem
+    data.wishlistByItem = Sync.SanitizeTree(byItem)
     data.items = data.items or {}
     for id, meta in pairs(items) do
       data.items[id] = data.items[id] or {}
-      data.items[id].name = meta.name or data.items[id].name
+      data.items[id].name = Sync.FixMojibake(meta.name or data.items[id].name)
     end
     data.revision = revision
     data.syncedAt = syncedAt
