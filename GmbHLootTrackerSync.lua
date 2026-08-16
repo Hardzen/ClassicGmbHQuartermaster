@@ -134,6 +134,9 @@ Sync.WISHLIST_RANKS = {
   ["gm"] = true,
 }
 
+-- Wishlist UI/sync only in Classic GmbH (not other guilds using the addon).
+Sync.WISHLIST_GUILD = "classic gmbh"
+
 -- bareName(lower) → { t = GetTime(), ver = "1.6.9" }
 local peers = {}
 local lastPresenceAnnounce = 0
@@ -301,6 +304,14 @@ local function namesEqual(a, b)
   return string.lower(bareName(a)) == string.lower(bareName(b))
 end
 
+local function isClassicGmbhGuild(guildName)
+  if not guildName then
+    return false
+  end
+  local key = string.lower(tostring(guildName)):gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", "")
+  return key == Sync.WISHLIST_GUILD
+end
+
 local function isWishlistRank(rankName)
   if not rankName then
     return false
@@ -327,7 +338,10 @@ function Sync.PlayerGuildRank()
 end
 
 function Sync.CanUseWishlist()
-  local _, rankName = Sync.PlayerGuildRank()
+  local guildName, rankName = Sync.PlayerGuildRank()
+  if not isClassicGmbhGuild(guildName) then
+    return false
+  end
   return isWishlistRank(rankName)
 end
 
@@ -1667,7 +1681,7 @@ function Sync.Request(opts)
   local quiet = opts.quiet
   if not Sync.CanUseWishlist() then
     if not quiet then
-      printMsg("Wishlist sync is for Officer / Headmaster guild ranks.")
+      printMsg("Wishlist sync is for Classic GmbH Officer / Headmaster ranks.")
     end
     return false
   end
@@ -1788,7 +1802,7 @@ function Sync.Share(toPlayer, opts)
   local quiet = opts.quiet
   if not Sync.CanUseWishlist() then
     if not quiet then
-      printMsg("Wishlist sync is for Officer / Headmaster guild ranks.")
+      printMsg("Wishlist sync is for Classic GmbH Officer / Headmaster ranks.")
     end
     return false
   end

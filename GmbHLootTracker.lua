@@ -961,10 +961,36 @@ local function makeMainTab(parent, text, width)
   return btn
 end
 
+function UI:RefreshWishlistTabVisibility()
+  local canWl = GmbHLootTrackerSync and GmbHLootTrackerSync.CanUseWishlist and GmbHLootTrackerSync.CanUseWishlist()
+  if self.tabWishlist then
+    if canWl then
+      self.tabWishlist:Show()
+    else
+      self.tabWishlist:Hide()
+      if self.mainTab == "wishlist" then
+        self.mainTab = "raid"
+      end
+    end
+  end
+  if self.tabOptions and self.tabRaid then
+    self.tabOptions:ClearAllPoints()
+    if canWl and self.tabWishlist and self.tabWishlist:IsShown() then
+      self.tabOptions:SetPoint("LEFT", self.tabWishlist, "RIGHT", 6, 0)
+    else
+      self.tabOptions:SetPoint("LEFT", self.tabRaid, "RIGHT", 6, 0)
+    end
+  end
+end
+
 function UI:SetMainTab(tab)
   self.mainTab = tab or "raid"
-  local mode = self.mainTab
   local canWl = GmbHLootTrackerSync and GmbHLootTrackerSync.CanUseWishlist()
+  self:RefreshWishlistTabVisibility()
+  if self.mainTab == "wishlist" and not canWl then
+    self.mainTab = "raid"
+  end
+  local mode = self.mainTab
 
   if self.tabRaid then
     styleTabButton(self.tabRaid, mode == "raid")
@@ -1006,20 +1032,13 @@ function UI:SetMainTab(tab)
     return
   end
 
-  -- Wishlist tab
+  -- Wishlist tab (Classic GmbH Officer / Headmaster only — tab is hidden otherwise).
   if not canWl then
-    if self.lockPanel then
-      self.lockPanel:Show()
+    if self.raidPanel then
+      self.raidPanel:Show()
     end
-    local rank = nil
-    if GmbHLootTrackerSync then
-      local _
-      _, rank = GmbHLootTrackerSync.PlayerGuildRank()
-    end
-    self.lockLabel:SetText(string.format(
-      "Wishlist is limited to Officer / Headmaster guild ranks.\nYour rank: %s",
-      rank or "(not in guild)"
-    ))
+    self:ApplyInstanceBossView({ force = true })
+    self:RenderRaidSheet()
     return
   end
   if self.contentPanel then
@@ -3695,6 +3714,7 @@ function UI:Create()
     UI:SetMainTab("options")
   end)
   self.tabOptions = tabOptions
+  self:RefreshWishlistTabVisibility()
 
   -- ---- Raid sheet panel (all ranks) — next upcoming raid only ----
   local raidPanel = CreateFrame("Frame", nil, f, BackdropTemplateMixin and "BackdropTemplate" or nil)
@@ -4112,7 +4132,7 @@ end
 
 local function cmdWl(name)
   if GmbHLootTrackerSync and not GmbHLootTrackerSync.CanUseWishlist() then
-    printMsg("Wishlist is limited to Officer / Headmaster guild ranks.")
+    printMsg("Wishlist is limited to Classic GmbH Officer / Headmaster ranks.")
     return
   end
   local data = db()
@@ -4152,7 +4172,7 @@ end
 
 local function cmdNeed(itemIdRaw)
   if GmbHLootTrackerSync and not GmbHLootTrackerSync.CanUseWishlist() then
-    printMsg("Wishlist is limited to Officer / Headmaster guild ranks.")
+    printMsg("Wishlist is limited to Classic GmbH Officer / Headmaster ranks.")
     return
   end
   local itemId = tostring(tonumber(itemIdRaw) or trim(itemIdRaw) or "")
