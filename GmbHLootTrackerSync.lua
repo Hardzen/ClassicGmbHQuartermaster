@@ -1709,10 +1709,12 @@ local function noteOffer(kind, who, syncedAt, rev)
   }
 end
 
--- Newest syncedAt wins; equal stamps → lowest bare name (stable single sender).
+-- Newest syncedAt wins. Equal stamps → prefer self (so a fresh helper pull still
+-- broadcasts), else lowest bare name among peers (stable single sender).
 function Sync.PickSyncAuthority(kind)
   local now = GetTime()
   local bestName, bestSynced = nil, ""
+  local me = UnitName("player")
   local function consider(name, syncedAt)
     name = bareName(name)
     syncedAt = tostring(syncedAt or "")
@@ -1725,12 +1727,15 @@ function Sync.PickSyncAuthority(kind)
     end
     if syncedAtNewer(syncedAt, bestSynced) then
       bestName, bestSynced = name, syncedAt
-    elseif syncedAt == bestSynced and string.lower(name) < string.lower(bestName) then
-      bestName = name
+    elseif syncedAt == bestSynced then
+      if namesEqual(name, me) then
+        bestName = name
+      elseif (not namesEqual(bestName, me)) and string.lower(name) < string.lower(bestName) then
+        bestName = name
+      end
     end
   end
 
-  local me = UnitName("player")
   local canOffer = false
   if kind == "wl" then
     canOffer = Sync.CanUseWishlist() and Sync.HasWishlistData()
