@@ -1112,7 +1112,8 @@ local function encodeRaidLines(raids)
   end
   local slugs = {}
   for slug, raid in pairs(raids) do
-    if type(raid) == "table" and raid.has_sheet then
+    -- Never peer-sync drafts — only announced sheets leave the officer machine.
+    if type(raid) == "table" and raid.has_sheet and raid.announced then
       table.insert(slugs, tostring(slug))
     end
   end
@@ -1551,7 +1552,7 @@ local function localRaidsAreLocked()
     return true
   end
   for _, raid in pairs(data.raids) do
-    if type(raid) == "table" and raid.has_sheet and not raid.member_locked then
+    if type(raid) == "table" and raid.has_sheet and raid.announced and not raid.member_locked then
       return false
     end
   end
@@ -1561,7 +1562,7 @@ end
 local function raidsAreMemberLocked(raids)
   local any = false
   for _, raid in pairs(raids or {}) do
-    if type(raid) == "table" and raid.has_sheet then
+    if type(raid) == "table" and raid.has_sheet and raid.announced then
       any = true
       if not raid.member_locked then
         return false
@@ -1571,7 +1572,7 @@ local function raidsAreMemberLocked(raids)
   return any
 end
 
--- Unlocked (officer/helper) raid sheets only — locked member copies must not become sync sources.
+-- Announced + unlocked (officer/helper) sheets only — drafts and locked copies are not sync sources.
 function Sync.CanShareRaid()
   return Sync.HasRaidData() and not localRaidsAreLocked()
 end
@@ -1730,7 +1731,7 @@ function Sync.AnnounceRaid()
   local data = db()
   local raidN = 0
   for _, raid in pairs(data.raids or {}) do
-    if type(raid) == "table" and raid.has_sheet then
+    if type(raid) == "table" and raid.has_sheet and raid.announced then
       raidN = raidN + 1
     end
   end
@@ -1870,7 +1871,7 @@ function Sync.ShareRaid(toPlayer, opts)
   local quiet = opts.quiet
   if not Sync.CanShareRaid() then
     if not quiet then
-      printMsg("No unlocked raid sheet to share (run the Windows helper).")
+      printMsg("No announced raid sheet to share (announce on the website, then run the helper).")
     end
     return false
   end
@@ -1896,6 +1897,9 @@ function Sync.ShareRaid(toPlayer, opts)
   end
   local lines, raidCount = buildRaidLines(data)
   if #lines == 0 then
+    if not quiet then
+      printMsg("Nothing to share — raid sheet is not announced yet.")
+    end
     return false
   end
   if not targeted then
