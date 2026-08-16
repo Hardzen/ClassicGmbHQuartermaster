@@ -253,12 +253,98 @@ function Sync.GetLiveStatus()
   return nil
 end
 
+local function stampNewer(peer, localAt)
+  peer = tostring(peer or "")
+  localAt = tostring(localAt or "")
+  if peer == "" then
+    return false
+  end
+  if localAt == "" then
+    return true
+  end
+  return peer > localAt
+end
+
+local function tableHasKeys(t)
+  if type(t) ~= "table" then
+    return false
+  end
+  for _ in pairs(t) do
+    return true
+  end
+  return false
+end
+
+local function raidsHaveSheet(raids)
+  if type(raids) ~= "table" then
+    return false
+  end
+  for _, raid in pairs(raids) do
+    if type(raid) == "table" and raid.has_sheet then
+      return true
+    end
+  end
+  return false
+end
+
+-- HelperData is preferred for UI, but peer sync writes GmbHLootTrackerDB.
+-- Officers often have a raid-only HelperData.lua — overlay peer wishlist/raids from SV.
+local function overlayPeerFromSV(h, s)
+  if type(h) ~= "table" or type(s) ~= "table" then
+    return
+  end
+  if tableHasKeys(s.wishlistByItem) then
+    local helperHasWl = tableHasKeys(h.wishlistByItem)
+    if (not helperHasWl) or stampNewer(s.syncedAt, h.syncedAt) then
+      h.wishlistByItem = s.wishlistByItem
+      if type(s.items) == "table" then
+        h.items = h.items or {}
+        for id, meta in pairs(s.items) do
+          if type(meta) == "table" then
+            h.items[id] = h.items[id] or {}
+            if meta.name then
+              h.items[id].name = meta.name
+            end
+          end
+        end
+      end
+      if s.syncedAt and tostring(s.syncedAt) ~= "" then
+        h.syncedAt = s.syncedAt
+      end
+      if s.revision and tostring(s.revision) ~= "" then
+        h.revision = s.revision
+      end
+      if s.syncSource then
+        h.syncSource = s.syncSource
+      end
+      if s.syncFrom then
+        h.syncFrom = s.syncFrom
+      end
+    end
+  end
+  if raidsHaveSheet(s.raids) then
+    local helperHasRaid = raidsHaveSheet(h.raids)
+    local sRaidAt = s.raidSyncedAt or s.syncedAt or ""
+    local hRaidAt = h.raidSyncedAt or h.syncedAt or ""
+    if (not helperHasRaid) or stampNewer(sRaidAt, hRaidAt) then
+      h.raids = s.raids
+      h.raidSyncedAt = s.raidSyncedAt or sRaidAt
+      if s.raidRevision then
+        h.raidRevision = s.raidRevision
+      end
+    end
+  end
+end
+
 local function db()
   if GmbHLootTracker_GetDB then
     return GmbHLootTracker_GetDB()
   end
   local h = GmbHLootTrackerHelperData
   if type(h) == "table" and h.syncedAt and tostring(h.syncedAt) ~= "" then
+    if type(GmbHLootTrackerDB) == "table" then
+      overlayPeerFromSV(h, GmbHLootTrackerDB)
+    end
     return h
   end
   local s = GmbHLootTrackerDB
@@ -271,10 +357,13 @@ end
 -- Shared accessor used by UI + Sync (defined early in Sync, loaded before UI).
 function GmbHLootTracker_GetDB()
   local h = GmbHLootTrackerHelperData
+  local s = GmbHLootTrackerDB
   if type(h) == "table" and h.syncedAt and tostring(h.syncedAt) ~= "" then
+    if type(s) == "table" then
+      overlayPeerFromSV(h, s)
+    end
     return h
   end
-  local s = GmbHLootTrackerDB
   if type(s) == "table" and s.syncedAt and tostring(s.syncedAt) ~= "" then
     return s
   end
@@ -1475,15 +1564,7 @@ end
 
 -- Helper syncedAt is ISO-8601; lexicographic compare works for same format.
 local function syncedAtNewer(peer, localAt)
-  peer = tostring(peer or "")
-  localAt = tostring(localAt or "")
-  if peer == "" then
-    return false
-  end
-  if localAt == "" then
-    return true
-  end
-  return peer > localAt
+  return stampNewer(peer, localAt)
 end
 
 local function localRaidsAreLocked()
@@ -1992,25 +2073,36 @@ local function finishApply(kind, revision, syncedAt, raids, byItem, items, fromP
     return
   end
 
-  local data = beginPeerDB()
-  if hasRaids then
-    -- Names already fixed during decode; skip full-tree SanitizeTree (freezes Classic).
-    data.raids = raids
-    data.raidSyncedAt = syncedAt
-    data.raidRevision = revision
-  end
-  if hasWl then
-    data.wishlistByItem = byItem
-    data.items = data.items or {}
-    for id, meta in pairs(items or {}) do
-      data.items[id] = data.items[id] or {}
-      data.items[id].name = Sync.FixMojibake(meta.name or data.items[id].name)
+  local function applyPeerFields(data)
+    if type(data) ~= "table" then
+      return
     end
-    data.revision = revision
-    data.syncedAt = syncedAt
+    if hasRaids then
+      -- Names already fixed during decode; skip full-tree SanitizeTree (freezes Classic).
+      data.raids = raids
+      data.raidSyncedAt = syncedAt
+      data.raidRevision = revision
+    end
+    if hasWl then
+      data.wishlistByItem = byItem
+      data.items = data.items or {}
+      for id, meta in pairs(items or {}) do
+        data.items[id] = data.items[id] or {}
+        data.items[id].name = Sync.FixMojibake(meta.name or data.items[id].name)
+      end
+      data.revision = revision
+      data.syncedAt = syncedAt
+    end
+    data.syncSource = "guild"
+    data.syncFrom = fromPlayer
   end
-  data.syncSource = "guild"
-  data.syncFrom = fromPlayer
+
+  -- Persist in SV, and mirror into live HelperData so GetDB (which prefers HelperData)
+  -- shows peer wishlist to officers who only have a raid-only HelperData.lua.
+  applyPeerFields(beginPeerDB())
+  if type(GmbHLootTrackerHelperData) == "table" then
+    applyPeerFields(GmbHLootTrackerHelperData)
+  end
   local bits = {}
   if hasRaids then
     table.insert(bits, "raid")
