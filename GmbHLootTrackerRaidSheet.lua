@@ -118,7 +118,17 @@ local function slotText(slot, opts)
   if slot.fixed ~= nil and tostring(slot.fixed) ~= "" then
     text = "|cffc9b27a" .. tostring(slot.fixed) .. "|r"
   elseif slot.player_name and tostring(slot.player_name) ~= "" then
-    text = coloredText(playerColorHex(slot), tostring(slot.player_name))
+    local pname = tostring(slot.player_name)
+    text = coloredText(playerColorHex(slot), pname)
+    -- Tag the viewer so they spot themselves on the sheet.
+    local me = UnitName and UnitName("player")
+    if me then
+      local a = string.lower((pname:match("^([^%-]+)") or pname))
+      local b = string.lower((tostring(me):match("^([^%-]+)") or tostring(me)))
+      if a == b then
+        text = text .. " |cff66cc66(you)|r"
+      end
+    end
   else
     text = "|cff555555Empty|r"
   end
@@ -398,6 +408,10 @@ local function renderBuffs(ctx, section)
   local motwSlots = (motw and motw.slots) or {}
   local n = math.max(#fortSlots, #aiSlots, #motwSlots, 8)
   local widths = { 64, 118, 130, 130 }
+  -- Left column = buffs; debuffs sit to the right in unused space.
+  local colTop = ctx.y
+  local DEB_X = 470
+
   ctx:addGrid({ "", "Fortitude", "Arcane Intellect", "Mark of the Wild" }, widths, { header = true, height = 16 })
   for i = 1, n do
     ctx:addGrid({
@@ -448,17 +462,22 @@ local function renderBuffs(ctx, section)
     ctx:gap(4)
   end
 
+  local leftBottom = ctx.y
+
   if deb and deb.slots and #deb.slots > 0 then
-    ctx:subhead("Debuffs")
-    local debW = { 140, 140 }
+    ctx.y = colTop
+    ctx:addLine("|cff9eb6d4Debuffs|r", 0.62, 0.72, 0.85, DEB_X)
+    local debW = { 130, 120 }
     for _, slot in ipairs(deb.slots) do
       local left = tostring(slot.label or slot.id or "?")
       local mk = slotMarkKey(slot)
       if mk then
         left = markIcon(mk) .. " " .. left
       end
-      ctx:addGrid({ left, slotText(slot) }, debW, { indent = 8, height = 16 })
+      ctx:addGrid({ left, slotText(slot) }, debW, { indent = DEB_X, height = 16, width = 280 })
     end
+    local rightBottom = ctx.y
+    ctx.y = math.min(leftBottom, rightBottom)
   end
   ctx:gap(8)
 end
@@ -1622,6 +1641,142 @@ local function renderSection(ctx, section, raid, heading, solo)
 end
 
 GmbHLootTrackerRaidSheet = {}
+
+-- HUD must use the same kill-order + skull/cross/square as the sheet table.
+function GmbHLootTrackerRaidSheet.HudBoards(section, raid)
+  if type(section) ~= "table" then
+    return {}
+  end
+  local sid = sectionIdOf(section)
+  local boards = section.boards or {}
+  local bugLast = string.lower(tostring((raid and raid.bug_trio_last) or ""))
+  local marksByIdx = nil
+  if sid == "bugtrio" and bugLast ~= "" then
+    boards = orderBugTrioBoards(boards, bugLast)
+    marksByIdx = { "skull", "cross", "square" }
+  end
+  local out = {}
+  for i, board in ipairs(boards) do
+    local mark = nil
+    if marksByIdx and marksByIdx[i] then
+      mark = marksByIdx[i]
+    else
+      mark = boardMarkKey(board)
+      if not mark then
+        for _, s in ipairs(board.slots or {}) do
+          mark = slotMarkKey(s)
+          if mark then
+            break
+          end
+        end
+      end
+    end
+    table.insert(out, { board = board, mark = mark })
+  end
+  return out
+end
+
+-- Pair tank-healer seats to the same mark/tank as the General Tanking sheet grid.
+function GmbHLootTrackerRaidSheet.TankHealerTarget(section, slot)
+  if type(section) ~= "table" or type(slot) ~= "table" then
+    return nil, nil
+  end
+  local tanksBoard, healBoard
+  for _, board in ipairs(section.boards or {}) do
+    local id = string.lower(tostring(board.id or ""))
+    local label = string.lower(tostring(board.label or ""))
+    if id == "tank_healers" or id == "aq_theal" or string.find(label, "tank heal", 1, true)
+      or string.find(label, "dedicated tank healer", 1, true)
+    then
+      healBoard = board
+    elseif (string.find(id, "tank", 1, true) or string.find(label, "tank", 1, true))
+      and not string.find(id, "heal", 1, true)
+      and not string.find(label, "heal", 1, true)
+    then
+      tanksBoard = board
+    end
+  end
+  if not healBoard or not tanksBoard then
+    return nil, nil
+  end
+  local healIdx = nil
+  for i, s in ipairs(healBoard.slots or {}) do
+    if s == slot or tostring(s.id or "") == tostring(slot.id or "") then
+      healIdx = i
+      break
+    end
+  end
+  if not healIdx then
+    return nil, nil
+  end
+  local byMark = {}
+  for _, s in ipairs(tanksBoard.slots or {}) do
+    local m = slotMarkKey(s) or "none"
+    byMark[m] = byMark[m] or { tank = nil, backup = nil }
+    local lab = string.lower(tostring(s.label or ""))
+    local sid = string.lower(tostring(s.id or ""))
+    if string.find(lab, "backup", 1, true) or lab == "bt" or string.find(sid, "_bt_", 1, true) then
+      byMark[m].backup = s
+    else
+      byMark[m].tank = s
+    end
+  end
+  local marks = {}
+  for _, m in ipairs(MARK_ORDER) do
+    if byMark[m] then
+      table.insert(marks, m)
+    end
+  end
+  local m = marks[healIdx]
+  if not m then
+    return nil, nil
+  end
+  local tankSlot = byMark[m] and byMark[m].tank
+  local tankName = tankSlot and tankSlot.player_name and tostring(tankSlot.player_name) or nil
+  return m, tankName
+end
+
+-- Twin Emperors: Left / Right / Bugs from board id/label.
+function GmbHLootTrackerRaidSheet.TwinsSideLabel(board)
+  if type(board) ~= "table" then
+    return nil
+  end
+  local id = string.lower(tostring(board.id or ""))
+  local lab = string.lower(tostring(board.mob or board.label or ""))
+  -- Require twin_ board ids so "Skeram Left" never matches.
+  if string.find(id, "twin_", 1, true) or id == "twin_left" or id == "twin_right" or id == "twin_bugs" then
+    if string.find(id, "left", 1, true) or string.find(lab, "left", 1, true)
+      or string.find(lab, "vek.nilash", 1, true) or string.find(lab, "vek'nilash", 1, true)
+    then
+      return "Left"
+    end
+    if string.find(id, "right", 1, true) or string.find(lab, "right", 1, true)
+      or string.find(lab, "vek.lor", 1, true) or string.find(lab, "vek'lor", 1, true)
+    then
+      return "Right"
+    end
+    if string.find(id, "bug", 1, true) or string.find(lab, "bug", 1, true) then
+      return "Bugs"
+    end
+  end
+  return nil
+end
+
+-- Warlock lock-tank name (+ mark) on the same twin side board.
+function GmbHLootTrackerRaidSheet.TwinsLockTank(board)
+  if type(board) ~= "table" then
+    return nil, nil
+  end
+  for _, s in ipairs(board.slots or {}) do
+    local lab = string.lower(tostring(s.label or ""))
+    local sid = string.lower(tostring(s.id or ""))
+    if string.find(lab, "lock", 1, true) or string.find(sid, "_lock", 1, true) then
+      local name = s.player_name and tostring(s.player_name) or nil
+      return name, slotMarkKey(s) or s.mark
+    end
+  end
+  return nil, nil
+end
 
 function GmbHLootTrackerRaidSheet.Render(ui, raid, sections, heading)
   local ctx = newCtx(ui)

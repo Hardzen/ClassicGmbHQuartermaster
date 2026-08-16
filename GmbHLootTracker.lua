@@ -911,7 +911,16 @@ local function formatRaidPlayer(p)
   if not p or not p.name then
     return "|cff555555—|r"
   end
-  local name = coloredText(playerColorHex(p), tostring(p.name))
+  local rawName = tostring(p.name)
+  local name = coloredText(playerColorHex(p), rawName)
+  local me = UnitName and UnitName("player")
+  if me then
+    local a = string.lower(rawName:match("^([^%-]+)") or rawName)
+    local b = string.lower(tostring(me):match("^([^%-]+)") or tostring(me))
+    if a == b then
+      name = name .. " |cff66cc66(you)|r"
+    end
+  end
   -- Addon checkmarks only while actually in a raid.
   if inRaidForChecks()
     and GmbHLootTrackerSync
@@ -954,39 +963,51 @@ end
 
 function UI:SetMainTab(tab)
   self.mainTab = tab or "raid"
-  local isRaid = self.mainTab == "raid"
+  local mode = self.mainTab
   local canWl = GmbHLootTrackerSync and GmbHLootTrackerSync.CanUseWishlist()
 
   if self.tabRaid then
-    styleTabButton(self.tabRaid, isRaid)
+    styleTabButton(self.tabRaid, mode == "raid")
   end
   if self.tabWishlist then
-    styleTabButton(self.tabWishlist, not isRaid)
+    styleTabButton(self.tabWishlist, mode == "wishlist")
+  end
+  if self.tabOptions then
+    styleTabButton(self.tabOptions, mode == "options")
   end
 
-  if isRaid then
+  if self.raidPanel then
+    self.raidPanel:Hide()
+  end
+  if self.contentPanel then
+    self.contentPanel:Hide()
+  end
+  if self.lockPanel then
+    self.lockPanel:Hide()
+  end
+  if self.optionsPanel then
+    self.optionsPanel:Hide()
+  end
+
+  if mode == "raid" then
     if self.raidPanel then
       self.raidPanel:Show()
-    end
-    if self.contentPanel then
-      self.contentPanel:Hide()
-    end
-    if self.lockPanel then
-      self.lockPanel:Hide()
     end
     self:ApplyInstanceBossView({ force = true })
     self:RenderRaidSheet()
     return
   end
 
-  -- Wishlist tab
-  if self.raidPanel then
-    self.raidPanel:Hide()
-  end
-  if not canWl then
-    if self.contentPanel then
-      self.contentPanel:Hide()
+  if mode == "options" then
+    if self.optionsPanel then
+      self.optionsPanel:Show()
     end
+    self:RefreshOptionsPanel()
+    return
+  end
+
+  -- Wishlist tab
+  if not canWl then
     if self.lockPanel then
       self.lockPanel:Show()
     end
@@ -1000,9 +1021,6 @@ function UI:SetMainTab(tab)
       rank or "(not in guild)"
     ))
     return
-  end
-  if self.lockPanel then
-    self.lockPanel:Hide()
   end
   if self.contentPanel then
     self.contentPanel:Show()
@@ -1022,7 +1040,30 @@ function UI:SetRaidSlug(slug)
   self:RenderRaidSheet()
 end
 
-local function isGeneralSectionLabel(label)
+local function isTankingSectionLabel(label, section)
+  if section and tostring(section.id or "") == "general_tanks" then
+    return true
+  end
+  local l = string.lower(tostring(label or ""))
+  if l == "" then
+    return false
+  end
+  if string.find(l, "tanking", 1, true) then
+    return true
+  end
+  if string.find(l, "groupheal", 1, true) then
+    return true
+  end
+  if string.find(l, "general tank", 1, true) then
+    return true
+  end
+  return false
+end
+
+local function isGeneralSectionLabel(label, section)
+  if isTankingSectionLabel(label, section) then
+    return false
+  end
   local l = string.lower(tostring(label or ""))
   if l == "" or l == "raid groups" then
     return false
@@ -1034,12 +1075,6 @@ local function isGeneralSectionLabel(label)
     return true
   end
   if string.find(l, "general", 1, true) then
-    return true
-  end
-  if string.find(l, "tanking", 1, true) then
-    return true
-  end
-  if string.find(l, "groupheal", 1, true) then
     return true
   end
   if string.find(l, "utility", 1, true) then
@@ -1108,19 +1143,22 @@ function UI:CollectRaidSections(raid)
   end
 
   local general = {}
+  local tanking = {}
   local bosses = {}
   for _, section in ipairs(sections) do
     local label = tostring(section.label or "")
     local low = string.lower(label)
     if low == "raid groups" or low == "groups" then
       -- handled by Groups tab
-    elseif isGeneralSectionLabel(label) then
+    elseif isTankingSectionLabel(label, section) then
+      table.insert(tanking, section)
+    elseif isGeneralSectionLabel(label, section) then
       table.insert(general, section)
     else
       table.insert(bosses, section)
     end
   end
-  return general, bosses
+  return general, tanking, bosses
 end
 
 function UI:EnsureRaidNavTab(i)
@@ -1139,49 +1177,69 @@ function UI:EnsureRaidNavTab(i)
   return btn
 end
 
-function UI:RebuildRaidNavTabs(generalSections, bossSections)
+function UI:RebuildRaidNavTabs(generalSections, tankingSections, bossSections)
   if not self.raidTabChild then
     return
   end
-  local tabs = {
+  local row1 = {
     { key = "groups", label = "Groups" },
     { key = "general", label = "General" },
+    { key = "tanking", label = "General Tanking" },
   }
+  local row2 = {}
   for _, section in ipairs(bossSections or {}) do
     local label = tostring(section.label or "Boss")
-    table.insert(tabs, {
+    table.insert(row2, {
       key = "boss:" .. label,
       label = shortTabLabel(label, 15),
       full = label,
     })
   end
 
-  local x = 0
+  local ROW_H = 26
   local GAP = 5
-  for i, tab in ipairs(tabs) do
-    local btn = self:EnsureRaidNavTab(i)
-    local width = math.max(70, math.min(120, 10 + #tab.label * 7))
-    btn:SetWidth(width)
-    btn:ClearAllPoints()
-    btn:SetPoint("TOPLEFT", self.raidTabChild, "TOPLEFT", x, 0)
-    btn.label:SetText(tab.label)
-    btn.viewKey = tab.key
-    btn.fullLabel = tab.full
-    btn:Show()
-    styleTabButton(btn, self.raidView == tab.key)
-    x = x + width + GAP
+  local tabIdx = 0
+  local maxW = 200
+
+  local function placeRow(tabs, y)
+    local x = 0
+    for _, tab in ipairs(tabs) do
+      tabIdx = tabIdx + 1
+      local btn = self:EnsureRaidNavTab(tabIdx)
+      local width = math.max(70, math.min(130, 10 + #tab.label * 7))
+      btn:SetWidth(width)
+      btn:ClearAllPoints()
+      btn:SetPoint("TOPLEFT", self.raidTabChild, "TOPLEFT", x, y)
+      btn.label:SetText(tab.label)
+      btn.viewKey = tab.key
+      btn.fullLabel = tab.full
+      btn:Show()
+      styleTabButton(btn, self.raidView == tab.key)
+      x = x + width + GAP
+    end
+    if x > maxW then
+      maxW = x
+    end
   end
-  for i = #tabs + 1, #(self.raidNavTabs or {}) do
+
+  placeRow(row1, 0)
+  placeRow(row2, -(ROW_H + 2))
+
+  for i = tabIdx + 1, #(self.raidNavTabs or {}) do
     self.raidNavTabs[i]:Hide()
   end
-  self.raidTabChild:SetWidth(math.max(x + 4, 200))
+  self.raidTabChild:SetWidth(math.max(maxW + 4, 200))
+  self.raidTabChild:SetHeight(ROW_H * 2 + 4)
   self.raidNavSpec = {
     general = generalSections or {},
+    tanking = tankingSections or {},
     bosses = bossSections or {},
   }
 
   -- If current view is a missing boss tab, fall back.
-  local ok = self.raidView == "groups" or self.raidView == "general"
+  local ok = self.raidView == "groups"
+    or self.raidView == "general"
+    or self.raidView == "tanking"
   if not ok and self.raidView and string.sub(self.raidView, 1, 5) == "boss:" then
     local want = string.sub(self.raidView, 6)
     for _, section in ipairs(bossSections or {}) do
@@ -1192,7 +1250,7 @@ function UI:RebuildRaidNavTabs(generalSections, bossSections)
     end
   end
   if not ok then
-    self.raidView = "general"
+    self.raidView = "tanking"
   end
 end
 
@@ -1218,6 +1276,26 @@ function UI:SetRaidView(view, opts)
     end
   end
   self:RenderRaidSheet()
+  -- If Test HUD is active, follow the boss/tab you just opened.
+  if self.hudTestBoss then
+    local label = nil
+    local v = self.raidView or ""
+    if string.sub(v, 1, 5) == "boss:" then
+      label = string.sub(v, 6)
+    elseif v == "tanking" then
+      label = "General tanking"
+    elseif v == "general" then
+      label = "Buffs"
+    end
+    if label and label ~= "" then
+      self.hudTestSlug = preferredRaidSlug()
+      self.hudTestBoss = label
+      if self.assignHud then
+        self.assignHud._userHidden = false
+      end
+      self:RefreshAssignHud()
+    end
+  end
 end
 
 -- Inside AQ40/Naxx: select the boss tab for current wing / targeted boss.
@@ -1236,7 +1314,7 @@ function UI:ApplyInstanceBossView(opts)
   if not raid then
     return false
   end
-  local _, bossSections = self:CollectRaidSections(raid)
+  local _, _, bossSections = self:CollectRaidSections(raid)
   local label = matchBossSectionLabel(bossSections, want)
   if not label then
     return false
@@ -1279,81 +1357,130 @@ local function shortBossTitle(label)
   return t
 end
 
-local function formatPersonalRole(slotLabel, bossLabel)
+local function formatPersonalRole(slotLabel, bossLabel, boardLabel, markKey, healTankName, twinsSide, twinsLockName, twinsLockMark)
   local role = tostring(slotLabel or "Assignment")
   local boss = shortBossTitle(bossLabel)
+  local mob = tostring(boardLabel or "")
+  if mob == "" or mob == tostring(bossLabel or "") then
+    mob = boss
+  else
+    mob = mob:gsub("^Skeram %- ", "Skeram ")
+  end
+  -- Twins: always use Left / Right / Bugs as the place name.
+  if twinsSide and twinsSide ~= "" then
+    if twinsSide == "Bugs" then
+      mob = "Mutated Bugs"
+    else
+      mob = twinsSide .. " twin"
+    end
+  end
   local low = string.lower(role)
   local g = role:match("[Gg]%s*(%d+)") or role:match("group%s*(%d+)")
+  local ic = markIcon(markKey)
+  local lockIc = markIcon(twinsLockMark)
+  local lockBit = ""
+  if twinsLockName and twinsLockName ~= "" then
+    if lockIc then
+      lockBit = string.format(" · lock %s %s", lockIc, twinsLockName)
+    else
+      lockBit = " · lock " .. twinsLockName
+    end
+  end
+
+  local function tankingLine(kind)
+    if ic then
+      return string.format("%s %s %s%s", kind, ic, mob, lockBit)
+    end
+    return string.format("%s %s%s", kind, mob, lockBit)
+  end
+
+  local function healLine()
+    if low:match("^g%d+$") or string.find(low, "groupheal", 1, true) then
+      local grp = role:match("[Gg]%s*(%d+)") or g
+      if grp then
+        return string.format("Groupheal G%s", grp)
+      end
+    end
+    -- Twins: side + warrior tank + warlock lock tank.
+    if twinsSide then
+      local bits = { "Heal " .. mob }
+      if healTankName and healTankName ~= "" then
+        table.insert(bits, "tank " .. healTankName)
+      end
+      if twinsLockName and twinsLockName ~= "" then
+        if lockIc then
+          table.insert(bits, string.format("lock %s %s", lockIc, twinsLockName))
+        else
+          table.insert(bits, "lock " .. twinsLockName)
+        end
+      end
+      return table.concat(bits, " · ")
+    end
+    -- Boss rows (Skeram etc.): heal the tank on that mark/mob.
+    local target = (healTankName and healTankName ~= "") and healTankName or mob
+    if ic then
+      return string.format("Heal %s %s", ic, target)
+    end
+    return string.format("Heal %s", target)
+  end
+
   if string.find(low, "dispel", 1, true) then
     if g then
       return string.format("Dispel group %s on %s", g, boss)
     end
     return "Dispel on " .. boss
   end
-  if string.find(low, "tank healer", 1, true) or string.find(low, "tank heal", 1, true) then
-    return "MT heal on " .. boss
+  if string.find(low, "backup tank", 1, true) or low == "backup" or low == "bt" then
+    return tankingLine("Backup tanking")
   end
-  if low == "tank" or low == "mt" or low == "main tank" then
-    return "Main tank on " .. boss
+  if string.find(low, "lock tank", 1, true) or (string.find(low, "lock", 1, true) and string.find(low, "tank", 1, true)) then
+    -- Lock tank themselves: no nested "lock Name" bit.
+    if ic then
+      return string.format("Lock tanking %s %s", ic, mob)
+    end
+    return "Lock tanking " .. mob
   end
-  if string.find(low, "backup tank", 1, true) or low == "backup" then
-    return "Backup tank on " .. boss
+  if low == "tank" or low == "mt" or low == "main tank" or low == "ot"
+    or (string.find(low, "tank", 1, true) and not string.find(low, "heal", 1, true) and not string.find(low, "lock", 1, true))
+  then
+    return tankingLine("Tanking")
   end
-  if string.find(low, "lock tank", 1, true) then
-    return "Lock tank on " .. boss
+  if string.find(low, "tank healer", 1, true) or string.find(low, "tank heal", 1, true)
+    or string.find(low, "healer", 1, true) or low:match("^heal")
+    or (string.find(low, "heal", 1, true) and not string.find(low, "kick", 1, true))
+  then
+    return healLine()
+  end
+  if low:match("^g%d+$") and string.find(string.lower(tostring(boardLabel or "")), "groupheal", 1, true) then
+    return healLine()
   end
   if string.find(low, "kick", 1, true) then
+    if mob ~= boss then
+      return role .. " on " .. mob .. lockBit
+    end
     return role .. " on " .. boss
   end
-  if string.find(low, "heal", 1, true) then
-    return role .. " on " .. boss
+  if mob ~= boss or twinsSide then
+    return role .. " on " .. mob .. lockBit
   end
   return role .. " on " .. boss
 end
 
--- Extra characters who always see the full officer-style assignment HUD
--- (in addition to Officer/Headmaster ranks and RL/Assist).
-local FULL_ASSIGNMENT_VIEWERS = {
-  ["bexy"] = true,
-}
+-- HUD assignment scope: "full" (default) or "mine". Saved per-character.
+local function preferFullHudAssignments()
+  local dbc = type(GmbHLootTrackerCharDB) == "table" and GmbHLootTrackerCharDB or nil
+  if dbc and tostring(dbc.hudAssignments or "") == "mine" then
+    return false
+  end
+  return true
+end
 
 local function canViewFullBossAssignments()
-  local me = string.lower(myPlayerKey() or "")
-  if me ~= "" and FULL_ASSIGNMENT_VIEWERS[me] then
-    return true
-  end
-  if GmbHLootTrackerSync and GmbHLootTrackerSync.CanUseWishlist and GmbHLootTrackerSync.CanUseWishlist() then
-    return true
-  end
-  if UnitIsGroupLeader and UnitIsGroupLeader("player") then
-    return true
-  end
-  if IsRaidLeader and IsRaidLeader() then
-    return true
-  end
-  if IsRaidOfficer and IsRaidOfficer() then
-    return true
-  end
-  if UnitIsGroupAssistant and UnitIsGroupAssistant("player") then
-    return true
-  end
-  return false
+  return preferFullHudAssignments()
 end
 
 local function canViewCthunMarkRoster()
-  if UnitIsGroupLeader and UnitIsGroupLeader("player") then
-    return true
-  end
-  if IsRaidLeader and IsRaidLeader() then
-    return true
-  end
-  if IsRaidOfficer and IsRaidOfficer() then
-    return true
-  end
-  if UnitIsGroupAssistant and UnitIsGroupAssistant("player") then
-    return true
-  end
-  return false
+  return preferFullHudAssignments()
 end
 
 local CTHUN_MARK_ORDER = { "skull", "cross", "square", "moon", "triangle", "diamond", "circle", "star" }
@@ -1528,7 +1655,7 @@ local function shortBoardPrefix(boardLab, sectionLabel, role)
   return shortBoard
 end
 
-local function formatHudAssignmentLine(role, slot, me)
+local function formatHudAssignmentLine(role, slot, me, markOverride)
   local who = slot.player_name and tostring(slot.player_name) or ""
   local nameBit
   if who ~= "" then
@@ -1539,14 +1666,14 @@ local function formatHudAssignmentLine(role, slot, me)
   else
     nameBit = "|cff666666—|r"
   end
-  local ic = markIcon(slot.mark)
+  local ic = markIcon(markOverride or slot.mark)
   if ic and who ~= "" then
     return string.format("%s: %s%s", role, ic, nameBit)
   end
   return string.format("%s: %s", role, nameBit)
 end
 
-function UI:CollectPersonalAssignments(section)
+function UI:CollectPersonalAssignments(section, raid)
   if isCthunSection(section) then
     return self:CollectCthunHudLines(section, false)
   end
@@ -1557,14 +1684,95 @@ function UI:CollectPersonalAssignments(section)
   local bossLabel = tostring(section.label or "boss")
   local lines = {}
   local seen = {}
-  for _, board in ipairs(section.boards or {}) do
+  local RS = GmbHLootTrackerRaidSheet
+  local boards = (RS and RS.HudBoards) and RS.HudBoards(section, raid) or nil
+  if not boards then
+    boards = {}
+    for _, board in ipairs(section.boards or {}) do
+      table.insert(boards, { board = board, mark = nil })
+    end
+  end
+  for _, entry in ipairs(boards) do
+    local board = entry.board
+    local boardLab = tostring(board.mob or board.label or "")
+    local boardId = string.lower(tostring(board.id or ""))
+    local boardLabLow = string.lower(boardLab)
+    local twinsSide = nil
+    local twinsLockName, twinsLockMark = nil, nil
+    if RS then
+      -- Only Twin Emperors boards get Left/Right/lock labeling (not "Skeram Left").
+      local lowSec = string.lower(tostring(section.label or "") .. " " .. tostring(section.id or ""))
+      if string.find(lowSec, "twin", 1, true) then
+        twinsSide = RS.TwinsSideLabel and RS.TwinsSideLabel(board) or nil
+        if twinsSide and RS.TwinsLockTank then
+          twinsLockName, twinsLockMark = RS.TwinsLockTank(board)
+        end
+      end
+    end
     for _, slot in ipairs(board.slots or {}) do
       if slot.player_name and barePlayerName(slot.player_name) == me then
-        local line = formatPersonalRole(slot.label, bossLabel)
-        local ic = markIcon(slot.mark)
-        if ic then
-          line = ic .. line
+        local mark = entry.mark or slot.mark
+        -- Twins: marks live on tank/lock slots (fallback when HelperData omits slot.mark).
+        if twinsSide then
+          local sid = string.lower(tostring(slot.id or ""))
+          local twinsMark = ({
+            twin_l_t = "triangle", twin_l_lock = "diamond",
+            twin_r_t = "square", twin_r_lock = "moon",
+            twin_bugs_t = "circle",
+          })[sid]
+          if twinsMark then
+            mark = tostring(slot.mark or "") ~= "" and slot.mark or twinsMark
+          end
         end
+        local healTank = nil
+        local roleLow = string.lower(tostring(slot.label or ""))
+        local isHeal = string.find(roleLow, "heal", 1, true)
+          or string.find(roleLow, "healer", 1, true)
+          or tostring(slot.role or "") == "healer"
+          or (roleLow:match("^g%d+$") and string.find(boardLabLow, "groupheal", 1, true))
+        if isHeal then
+          if string.find(boardLabLow, "tank heal", 1, true)
+            or boardId == "aq_theal" or boardId == "tank_healers"
+          then
+            local mk, tankName = nil, nil
+            if RS and RS.TankHealerTarget then
+              mk, tankName = RS.TankHealerTarget(section, slot)
+            end
+            if mk then
+              mark = mk
+            end
+            healTank = tankName
+          else
+            -- Boss row (Skeram Left / Twins side / etc.): find the Tank seat on this board.
+            for _, s in ipairs(board.slots or {}) do
+              local lab = string.lower(tostring(s.label or ""))
+              local sid = string.lower(tostring(s.id or ""))
+              local isPrimaryTank = (lab == "tank" or lab == "mt" or lab == "main tank")
+                or (
+                  string.find(lab, "tank", 1, true)
+                  and not string.find(lab, "backup", 1, true)
+                  and not string.find(lab, "lock", 1, true)
+                  and not string.find(lab, "heal", 1, true)
+                )
+                or sid:match("_t$") ~= nil
+                or sid:match("_mt$") ~= nil
+              if isPrimaryTank and s.player_name and tostring(s.player_name) ~= "" then
+                healTank = tostring(s.player_name)
+                break
+              end
+            end
+          end
+        end
+        local line = formatPersonalRole(
+          slot.label,
+          bossLabel,
+          boardLab,
+          mark,
+          healTank,
+          twinsSide,
+          twinsLockName,
+          twinsLockMark
+        )
         if line and not seen[line] then
           seen[line] = true
           table.insert(lines, line)
@@ -1575,7 +1783,7 @@ function UI:CollectPersonalAssignments(section)
   return lines
 end
 
-function UI:CollectAllBossAssignments(section)
+function UI:CollectAllBossAssignments(section, raid)
   if isCthunSection(section) then
     return self:CollectCthunHudLines(section, true)
   end
@@ -1587,8 +1795,20 @@ function UI:CollectAllBossAssignments(section)
   local otherLines = {}
   local sectionLabel = tostring(section.label or "")
 
-  for _, board in ipairs(section.boards or {}) do
+  local RS = GmbHLootTrackerRaidSheet
+  local boards = (RS and RS.HudBoards) and RS.HudBoards(section, raid) or nil
+  if not boards then
+    boards = {}
+    for _, board in ipairs(section.boards or {}) do
+      table.insert(boards, { board = board, mark = nil })
+    end
+  end
+
+  for _, entry in ipairs(boards) do
+    local board = entry.board
     local boardLab = tostring(board.label or "")
+    -- Tank mark is per-mob (Bug Trio kill-order), not the stale slot.mark fallback.
+    local boardMark = entry.mark
     for _, slot in ipairs(board.slots or {}) do
       local role = tostring(slot.label or "?")
       local prefix = shortBoardPrefix(boardLab, sectionLabel, role)
@@ -1597,9 +1817,16 @@ function UI:CollectAllBossAssignments(section)
       end
       local who = slot.player_name and tostring(slot.player_name) or ""
       local tanking = isTankingSlot(slot)
-      -- Officers: always list tanking slots (even empty). Other roles only when filled.
       if tanking or who ~= "" then
-        local line = formatHudAssignmentLine(role, slot, me)
+        local mark = nil
+        if tanking and boardMark then
+          mark = boardMark
+        elseif not tanking then
+          mark = nil -- kicks/healers: no wrong fallback icons
+        else
+          mark = slot.mark
+        end
+        local line = formatHudAssignmentLine(role, slot, me, mark)
         if tanking then
           table.insert(tankLines, line)
         else
@@ -1638,17 +1865,33 @@ function UI:GetPersonalBossAssignmentLines()
   if not want and self.raidView and string.sub(tostring(self.raidView), 1, 5) == "boss:" then
     want = string.sub(self.raidView, 6)
   end
+  if not want and self.raidView == "tanking" then
+    want = "General tanking"
+  end
+  if not want and self.raidView == "general" then
+    want = "Buffs"
+  end
   local full = canViewFullBossAssignments()
   if not want then
     return {}, nil, full
   end
-  local _, bossSections = self:CollectRaidSections(raid)
-  local label = matchBossSectionLabel(bossSections, want)
+  local generalSections, tankingSections, bossSections = self:CollectRaidSections(raid)
+  local allSections = {}
+  for _, s in ipairs(tankingSections or {}) do
+    table.insert(allSections, s)
+  end
+  for _, s in ipairs(generalSections or {}) do
+    table.insert(allSections, s)
+  end
+  for _, s in ipairs(bossSections or {}) do
+    table.insert(allSections, s)
+  end
+  local label = matchBossSectionLabel(allSections, want)
   if not label then
     return {}, want, full
   end
   local section = nil
-  for _, s in ipairs(bossSections or {}) do
+  for _, s in ipairs(allSections) do
     if tostring(s.label or "") == label then
       section = s
       break
@@ -1662,9 +1905,9 @@ function UI:GetPersonalBossAssignmentLines()
     return self:CollectCthunHudLines(section, cthunFull), label, cthunFull
   end
   if full then
-    return self:CollectAllBossAssignments(section), label, true
+    return self:CollectAllBossAssignments(section, raid), label, true
   end
-  return self:CollectPersonalAssignments(section), label, false
+  return self:CollectPersonalAssignments(section, raid), label, false
 end
 
 -- UI prefs (HUD position, etc.) live in per-character SV so they survive reload
@@ -1681,6 +1924,127 @@ local function charDB()
     GmbHLootTrackerCharDB.assignHud = GmbHLootTrackerDB.assignHud
   end
   return GmbHLootTrackerCharDB
+end
+
+function UI:GetHudAssignmentsMode()
+  return preferFullHudAssignments() and "full" or "mine"
+end
+
+local HUD_SCALE_MIN = 0.75
+local HUD_SCALE_MAX = 2.0
+local HUD_SCALE_STEP = 0.25
+
+local function clampHudScale(scale)
+  scale = tonumber(scale) or 1
+  if scale < HUD_SCALE_MIN then
+    return HUD_SCALE_MIN
+  end
+  if scale > HUD_SCALE_MAX then
+    return HUD_SCALE_MAX
+  end
+  -- Snap to 0.05 so saved values stay tidy.
+  return math.floor(scale * 20 + 0.5) / 20
+end
+
+function UI:GetHudScale()
+  local dbc = charDB()
+  return clampHudScale(dbc and dbc.hudScale)
+end
+
+function UI:ApplyHudScale(frame)
+  frame = frame or self.assignHud
+  if not frame or not frame.SetScale then
+    return
+  end
+  frame:SetScale(self:GetHudScale())
+end
+
+function UI:SetHudScale(scale, quiet)
+  local dbc = charDB()
+  dbc.hudScale = clampHudScale(scale)
+  self:ApplyHudScale()
+  self:RefreshOptionsPanel()
+  if self.RefreshAssignHud then
+    self:RefreshAssignHud()
+  end
+  if not quiet then
+    printMsg(string.format("HUD size: %d%%", math.floor(self:GetHudScale() * 100 + 0.5)))
+  end
+end
+
+function UI:ResetHudSize()
+  local f = self.assignHud
+  if f then
+    f._userSized = nil
+  end
+  local dbChar = charDB()
+  local saved = type(dbChar.assignHud) == "table" and dbChar.assignHud or nil
+  if saved then
+    saved.userSized = nil
+    saved.w = nil
+    saved.h = nil
+  end
+  self:SetHudScale(1, true)
+  if self.RefreshAssignHud then
+    self:RefreshAssignHud()
+  end
+  printMsg("HUD size reset.")
+end
+
+function UI:NudgeHudScale(delta)
+  self:SetHudScale(self:GetHudScale() + (tonumber(delta) or 0))
+end
+
+function UI:SetHudAssignmentsMode(mode)
+  local dbc = charDB()
+  if mode == "mine" then
+    dbc.hudAssignments = "mine"
+  else
+    dbc.hudAssignments = "full"
+  end
+  self:RefreshOptionsPanel()
+  if self.RefreshAssignHud then
+    self:RefreshAssignHud()
+  end
+  printMsg(mode == "mine"
+    and "HUD: only your assignments."
+    or "HUD: full assignments.")
+end
+
+function UI:RefreshOptionsPanel()
+  if not self.optionsPanel then
+    return
+  end
+  local full = preferFullHudAssignments()
+  if self.optHudMineBtn then
+    styleTabButton(self.optHudMineBtn, not full)
+  end
+  if self.optHudFullBtn then
+    styleTabButton(self.optHudFullBtn, full)
+  end
+  if self.optHudHint then
+    self.optHudHint:SetText(full
+      and "Assignment HUD shows every filled role for the current boss."
+      or "Assignment HUD shows only roles assigned to you.")
+  end
+  if self.optHudScaleLabel then
+    self.optHudScaleLabel:SetText(string.format("%d%%", math.floor(self:GetHudScale() * 100 + 0.5)))
+  end
+  local scale = self:GetHudScale()
+  if self.optHudScaleSmaller then
+    if scale > HUD_SCALE_MIN then
+      self.optHudScaleSmaller:Enable()
+    else
+      self.optHudScaleSmaller:Disable()
+    end
+  end
+  if self.optHudScaleLarger then
+    if scale < HUD_SCALE_MAX then
+      self.optHudScaleLarger:Enable()
+    else
+      self.optHudScaleLarger:Disable()
+    end
+  end
 end
 
 local function saveAssignHudPosition(frame)
@@ -1706,12 +2070,23 @@ local function saveAssignHudPosition(frame)
     frame:ClearAllPoints()
     frame:SetPoint(point or "TOPLEFT", UIParent, relPoint or "BOTTOMLEFT", left, top)
   end
+  local w = frame:GetWidth()
+  local h = frame:GetHeight()
+  local userSized = frame._userSized and true or false
+  if not userSized and prev and prev.userSized and prev.w and prev.h then
+    userSized = true
+    w = tonumber(prev.w) or w
+    h = tonumber(prev.h) or h
+  end
   dbChar.assignHud = {
     point = "TOPLEFT",
     relPoint = "BOTTOMLEFT",
     x = left,
     y = top,
     hidden = frame._userHidden and true or false,
+    userSized = userSized or nil,
+    w = userSized and w or nil,
+    h = userSized and h or nil,
   }
 end
 
@@ -1730,8 +2105,24 @@ local function applyAssignHudPosition(frame)
       tonumber(saved.y) or 180
     )
     frame._userHidden = saved.hidden and true or false
+    if saved.userSized and saved.w and saved.h then
+      frame._userSized = true
+      frame:SetWidth(math.max(120, tonumber(saved.w) or 340))
+      frame:SetHeight(math.max(48, tonumber(saved.h) or 72))
+    end
   else
     frame:SetPoint("CENTER", UIParent, "CENTER", 0, 180)
+  end
+end
+
+local function applyAssignHudContentWidth(frame, width)
+  if not frame or not frame.body then
+    return
+  end
+  local bodyW = math.max(80, (tonumber(width) or frame:GetWidth() or 340) - 40)
+  frame.body:SetWidth(bodyW)
+  if frame.scrollChild then
+    frame.scrollChild:SetWidth(bodyW)
   end
 end
 
@@ -1810,22 +2201,137 @@ function UI:EnsureAssignHud()
 
   f:EnableMouseWheel(true)
   f:SetScript("OnMouseWheel", function(_, delta)
+    -- Alt+wheel resizes the HUD; plain wheel scrolls long assignment lists.
+    if IsAltKeyDown and IsAltKeyDown() then
+      if GmbHLootTrackerUI and GmbHLootTrackerUI.NudgeHudScale then
+        GmbHLootTrackerUI:NudgeHudScale(delta > 0 and HUD_SCALE_STEP or -HUD_SCALE_STEP)
+      end
+      return
+    end
     local cur = scroll:GetVerticalScroll() or 0
     local max = math.max(0, (child:GetHeight() or 0) - (scroll:GetHeight() or 0))
     scroll:SetVerticalScroll(math.max(0, math.min(max, cur - delta * 18)))
   end)
 
+  -- Shared resize loop: mode "both" (corner) or "height" (bottom edge).
+  local function beginHudResize(mode)
+    if f.IsProtected and f:IsProtected() then
+      return
+    end
+    f._resizing = true
+    f._dragging = true
+    f:SetScript("OnUpdate", function(selfFrame)
+      if not IsMouseButtonDown("LeftButton") then
+        selfFrame:SetScript("OnUpdate", nil)
+        selfFrame._resizing = nil
+        selfFrame._dragging = nil
+        selfFrame._userSized = true
+        saveAssignHudPosition(selfFrame)
+        return
+      end
+      local left = selfFrame:GetLeft()
+      local top = selfFrame:GetTop()
+      if not left or not top then
+        return
+      end
+      local mx, my = GetCursorPosition()
+      local uiScale = UIParent:GetEffectiveScale() or 1
+      mx, my = mx / uiScale, my / uiScale
+      local frameScale = selfFrame:GetScale() or 1
+      if frameScale < 0.01 then
+        frameScale = 1
+      end
+      local h = math.max(48, math.min(700, (top - my) / frameScale))
+      selfFrame:SetHeight(h)
+      if mode == "both" then
+        local w = math.max(120, math.min(900, (mx - left) / frameScale))
+        selfFrame:SetWidth(w)
+        applyAssignHudContentWidth(selfFrame, w)
+      end
+    end)
+  end
+
+  -- Bottom edge: drag to change height only.
+  local bottomEdge = CreateFrame("Button", nil, f)
+  bottomEdge:SetHeight(10)
+  bottomEdge:SetPoint("BOTTOMLEFT", 4, 0)
+  bottomEdge:SetPoint("BOTTOMRIGHT", -20, 0)
+  bottomEdge:SetFrameLevel((f:GetFrameLevel() or 0) + 4)
+  bottomEdge:EnableMouse(true)
+  local edgeTex = bottomEdge:CreateTexture(nil, "OVERLAY")
+  edgeTex:SetPoint("BOTTOMLEFT", 0, 2)
+  edgeTex:SetPoint("BOTTOMRIGHT", 0, 2)
+  edgeTex:SetHeight(2)
+  edgeTex:SetTexture("Interface\\Buttons\\WHITE8X8")
+  edgeTex:SetVertexColor(0.45, 0.62, 0.82, 0.55)
+  bottomEdge:SetScript("OnEnter", function()
+    edgeTex:SetVertexColor(0.65, 0.82, 0.98, 0.95)
+  end)
+  bottomEdge:SetScript("OnLeave", function()
+    edgeTex:SetVertexColor(0.45, 0.62, 0.82, 0.55)
+  end)
+  bottomEdge:SetScript("OnMouseDown", function(_, button)
+    if button and button ~= "LeftButton" then
+      return
+    end
+    beginHudResize("height")
+  end)
+  f.resizeBottom = bottomEdge
+
+  -- Bottom-right corner: click and drag to resize width + height.
+  local grip = CreateFrame("Button", nil, f)
+  grip:SetSize(18, 18)
+  grip:SetPoint("BOTTOMRIGHT", -1, 1)
+  grip:SetFrameLevel((f:GetFrameLevel() or 0) + 5)
+  grip:EnableMouse(true)
+  grip:RegisterForClicks("LeftButtonUp", "LeftButtonDown")
+  local gripTex = grip:CreateTexture(nil, "OVERLAY")
+  gripTex:SetAllPoints()
+  gripTex:SetTexture("Interface\\Buttons\\WHITE8X8")
+  gripTex:SetVertexColor(0.55, 0.72, 0.90, 0.85)
+  -- Simple corner chevron using two thin lines.
+  local line1 = grip:CreateTexture(nil, "ARTWORK")
+  line1:SetTexture("Interface\\Buttons\\WHITE8X8")
+  line1:SetVertexColor(0.15, 0.22, 0.32, 1)
+  line1:SetSize(10, 2)
+  line1:SetPoint("BOTTOMRIGHT", -3, 5)
+  local line2 = grip:CreateTexture(nil, "ARTWORK")
+  line2:SetTexture("Interface\\Buttons\\WHITE8X8")
+  line2:SetVertexColor(0.15, 0.22, 0.32, 1)
+  line2:SetSize(6, 2)
+  line2:SetPoint("BOTTOMRIGHT", -3, 9)
+  grip:SetScript("OnEnter", function(btn)
+    if btn.SetAlpha then
+      btn:SetAlpha(1)
+    end
+  end)
+  grip:SetScript("OnLeave", function(btn)
+    if btn.SetAlpha then
+      btn:SetAlpha(0.85)
+    end
+  end)
+  grip:SetAlpha(0.85)
+  grip:SetScript("OnMouseDown", function(_, button)
+    if button and button ~= "LeftButton" then
+      return
+    end
+    beginHudResize("both")
+  end)
+  f.resizeGrip = grip
+
   f:Hide()
   self.assignHud = f
+  self:ApplyHudScale(f)
   return f
 end
 
 function UI:RefreshAssignHud()
   local f = self:EnsureAssignHud()
-  -- Never re-anchor while the player is dragging.
-  if f._dragging then
+  -- Never re-anchor while the player is dragging or corner-resizing.
+  if f._dragging or f._resizing then
     return
   end
+  self:ApplyHudScale(f)
   local inst = instanceRaidSlug()
   if not inst and not self.hudTestBoss then
     f:Hide()
@@ -1849,39 +2355,46 @@ function UI:RefreshAssignHud()
   local isCthun = bossLabel and (string.lower(tostring(bossLabel)):find("c.?thun", 1) ~= nil)
   if full and isCthun then
     f.title:SetText(title .. "  ·  marks")
-    f:SetWidth(420)
-    f.body:SetWidth(390)
-    f.scrollChild:SetWidth(390)
   elseif full then
     f.title:SetText(title .. "  ·  all")
-    f:SetWidth(380)
-    f.body:SetWidth(350)
-    f.scrollChild:SetWidth(350)
   elseif isCthun then
     f.title:SetText(title .. "  ·  your mark")
-    f:SetWidth(160)
-    f.body:SetWidth(130)
-    f.scrollChild:SetWidth(130)
   else
     f.title:SetText(title)
-    f:SetWidth(340)
-    f.body:SetWidth(300)
-    f.scrollChild:SetWidth(300)
   end
+
+  local userSized = f._userSized and true or false
+  if not userSized then
+    if full and isCthun then
+      f:SetWidth(420)
+    elseif full then
+      f:SetWidth(380)
+    elseif isCthun then
+      f:SetWidth(160)
+    else
+      f:SetWidth(340)
+    end
+  end
+  applyAssignHudContentWidth(f, f:GetWidth())
+
   if not lines or #lines == 0 then
     f.body:SetText(full
       and "|cff888888No filled assignments for this boss.|r"
       or (isCthun and "|cff888888No mark assigned.|r" or "|cff888888No personal assignment for this boss.|r"))
     f.body:SetHeight(20)
     f.scrollChild:SetHeight(20)
-    f:SetHeight(56)
+    if not userSized then
+      f:SetHeight(56)
+    end
   else
     f.body:SetText(table.concat(lines, "\n"))
     local lineH = full and 14 or (isCthun and 22 or 16)
     local contentH = math.max(20, #lines * lineH)
     f.body:SetHeight(contentH)
     f.scrollChild:SetHeight(contentH)
-    f:SetHeight(math.min(full and 320 or 120, 34 + contentH))
+    if not userSized then
+      f:SetHeight(math.min(full and 320 or 120, 34 + contentH))
+    end
   end
   if f.scroll then
     f.scroll:SetVerticalScroll(0)
@@ -1911,7 +2424,7 @@ function UI:ToggleAssignHud()
     if not f:IsShown() then
       printMsg("Assignment HUD: enter AQ40/Naxx, or /gmbh target <boss> to test.")
     else
-      printMsg("Assignment HUD shown (drag to move).")
+      printMsg("Assignment HUD shown (drag to move, corner to resize).")
     end
   end
 end
@@ -2137,8 +2650,8 @@ function UI:RenderRaidSheet()
   end
   self.raidMeta:SetText(table.concat(bits, "  ·  "))
 
-  local generalSections, bossSections = self:CollectRaidSections(raid)
-  self:RebuildRaidNavTabs(generalSections, bossSections)
+  local generalSections, tankingSections, bossSections = self:CollectRaidSections(raid)
+  self:RebuildRaidNavTabs(generalSections, tankingSections, bossSections)
 
   -- Restyle after possible raidView fallback inside RebuildRaidNavTabs.
   for _, btn in ipairs(self.raidNavTabs or {}) do
@@ -2164,6 +2677,11 @@ function UI:RenderRaidSheet()
 
   if self.raidView == "groups" then
     self:RenderRaidGroupsView(raid)
+  elseif self.raidView == "tanking" then
+    if self.sortRaidBtn then
+      self.sortRaidBtn:Hide()
+    end
+    self:RenderRaidAssignmentsView(raid, tankingSections, "General tanking")
   elseif self.raidView == "general" then
     if self.sortRaidBtn then
       self.sortRaidBtn:Hide()
@@ -2898,7 +3416,7 @@ function UI:Create()
   self.syncLabel:SetJustifyH("LEFT")
   self.syncLabel:SetTextColor(0.55, 0.62, 0.72)
 
-  -- Main tabs: Raid (all) | Wishlist (officers)
+  -- Main tabs: Raid | Wishlist | Options
   local tabRaid = makeMainTab(f, "Raid sheet", 110)
   tabRaid:SetPoint("TOPLEFT", 16, -58)
   tabRaid:SetScript("OnClick", function()
@@ -2913,6 +3431,13 @@ function UI:Create()
   end)
   self.tabWishlist = tabWishlist
 
+  local tabOptions = makeMainTab(f, "Options", 90)
+  tabOptions:SetPoint("LEFT", tabWishlist, "RIGHT", 6, 0)
+  tabOptions:SetScript("OnClick", function()
+    UI:SetMainTab("options")
+  end)
+  self.tabOptions = tabOptions
+
   -- ---- Raid sheet panel (all ranks) — next upcoming raid only ----
   local raidPanel = CreateFrame("Frame", nil, f, BackdropTemplateMixin and "BackdropTemplate" or nil)
   raidPanel:SetPoint("TOPLEFT", 16, -92)
@@ -2925,13 +3450,13 @@ function UI:Create()
   self.raidMeta:SetPoint("RIGHT", raidPanel, "RIGHT", -14, 0)
   self.raidMeta:SetTextColor(0.70, 0.76, 0.85)
 
-  -- Horizontally scrollable: Groups | General | each boss
+  -- Two rows: Groups | General | General Tanking  /  boss tabs
   local tabScroll = CreateFrame("ScrollFrame", "GmbHLootTrackerRaidTabs", raidPanel)
   tabScroll:SetPoint("TOPLEFT", 12, -32)
   tabScroll:SetPoint("RIGHT", raidPanel, "RIGHT", -14, 0)
-  tabScroll:SetHeight(28)
+  tabScroll:SetHeight(58)
   local tabChild = CreateFrame("Frame", nil, tabScroll)
-  tabChild:SetSize(900, 28)
+  tabChild:SetSize(900, 58)
   tabScroll:SetScrollChild(tabChild)
   tabScroll:EnableMouseWheel(true)
   tabScroll:SetScript("OnMouseWheel", function(self, delta)
@@ -2944,7 +3469,7 @@ function UI:Create()
   self.raidNavTabs = {}
 
   local raidScroll = CreateFrame("ScrollFrame", "GmbHLootTrackerRaidScroll", raidPanel, "UIPanelScrollFrameTemplate")
-  raidScroll:SetPoint("TOPLEFT", 12, -66)
+  raidScroll:SetPoint("TOPLEFT", 12, -96)
   raidScroll:SetPoint("BOTTOMRIGHT", -32, 12)
   local raidChild = CreateFrame("Frame", nil, raidScroll)
   raidChild:SetSize(1000, 500)
@@ -2992,6 +3517,81 @@ function UI:Create()
 
   self.raidView = "groups"
   self.raidSlug = defaultRaid()
+
+  -- ---- Options (HUD prefs) ----
+  local optionsPanel = CreateFrame("Frame", nil, f, BackdropTemplateMixin and "BackdropTemplate" or nil)
+  optionsPanel:SetPoint("TOPLEFT", 16, -92)
+  optionsPanel:SetPoint("BOTTOMRIGHT", -16, 16)
+  setBackdrop(optionsPanel)
+  optionsPanel:Hide()
+  self.optionsPanel = optionsPanel
+
+  local optTitle = makeLabel(optionsPanel, "Assignment HUD", 14)
+  optTitle:SetPoint("TOPLEFT", 18, -20)
+  optTitle:SetTextColor(0.95, 0.88, 0.55)
+
+  local optSub = makeLabel(optionsPanel, "What the floating HUD shows for the current boss:", 12)
+  optSub:SetPoint("TOPLEFT", optTitle, "BOTTOMLEFT", 0, -10)
+  optSub:SetTextColor(0.70, 0.76, 0.85)
+
+  local optMine = makeMainTab(optionsPanel, "Only my assignments", 160)
+  optMine:SetPoint("TOPLEFT", optSub, "BOTTOMLEFT", 0, -16)
+  optMine:SetScript("OnClick", function()
+    UI:SetHudAssignmentsMode("mine")
+  end)
+  self.optHudMineBtn = optMine
+
+  local optFull = makeMainTab(optionsPanel, "Full assignments", 140)
+  optFull:SetPoint("LEFT", optMine, "RIGHT", 8, 0)
+  optFull:SetScript("OnClick", function()
+    UI:SetHudAssignmentsMode("full")
+  end)
+  self.optHudFullBtn = optFull
+
+  local optHint = makeLabel(optionsPanel, "", 11)
+  optHint:SetPoint("TOPLEFT", optMine, "BOTTOMLEFT", 0, -14)
+  optHint:SetPoint("RIGHT", optionsPanel, "RIGHT", -18, 0)
+  optHint:SetTextColor(0.60, 0.66, 0.74)
+  self.optHudHint = optHint
+
+  local optSizeTitle = makeLabel(optionsPanel, "HUD size", 12)
+  optSizeTitle:SetPoint("TOPLEFT", optHint, "BOTTOMLEFT", 0, -22)
+  optSizeTitle:SetTextColor(0.70, 0.76, 0.85)
+
+  local optSmaller = makeMainTab(optionsPanel, "Smaller", 80)
+  optSmaller:SetPoint("TOPLEFT", optSizeTitle, "BOTTOMLEFT", 0, -12)
+  optSmaller:SetScript("OnClick", function()
+    UI:NudgeHudScale(-HUD_SCALE_STEP)
+  end)
+  self.optHudScaleSmaller = optSmaller
+
+  local optScaleLabel = makeLabel(optionsPanel, "100%", 13)
+  optScaleLabel:SetPoint("LEFT", optSmaller, "RIGHT", 12, 0)
+  optScaleLabel:SetTextColor(0.95, 0.88, 0.55)
+  self.optHudScaleLabel = optScaleLabel
+
+  local optLarger = makeMainTab(optionsPanel, "Larger", 80)
+  optLarger:SetPoint("LEFT", optScaleLabel, "RIGHT", 12, 0)
+  optLarger:SetScript("OnClick", function()
+    UI:NudgeHudScale(HUD_SCALE_STEP)
+  end)
+  self.optHudScaleLarger = optLarger
+
+  local optReset = makeMainTab(optionsPanel, "Reset", 70)
+  optReset:SetPoint("LEFT", optLarger, "RIGHT", 8, 0)
+  optReset:SetScript("OnClick", function()
+    UI:ResetHudSize()
+  end)
+  self.optHudScaleReset = optReset
+
+  local optSizeHint = makeLabel(
+    optionsPanel,
+    "Drag the bottom edge for height, or the corner for width+height. Alt+wheel also works.",
+    11
+  )
+  optSizeHint:SetPoint("TOPLEFT", optSmaller, "BOTTOMLEFT", 0, -14)
+  optSizeHint:SetPoint("RIGHT", optionsPanel, "RIGHT", -18, 0)
+  optSizeHint:SetTextColor(0.60, 0.66, 0.74)
 
   -- ---- Wishlist lock (non-officers) ----
   local lockPanel = CreateFrame("Frame", nil, f, BackdropTemplateMixin and "BackdropTemplate" or nil)
@@ -3289,7 +3889,7 @@ local function cmdNeed(itemIdRaw)
 end
 
 local function usage()
-  printMsg("Commands: /gmbh | hud | target <boss> | debug | status | groups | sort | assign | wl | need")
+  printMsg("Commands: /gmbh | hud | hudscale <%> | target <boss> | debug | status | groups | sort | assign | wl | need")
 end
 
 SLASH_GMBH1 = "/gmbh"
@@ -3317,6 +3917,32 @@ SlashCmdList["GMBH"] = function(msg)
     return
   end
   local cmd, rest = msg:match("^(%S+)%s*(.-)$")
+  if cmd == "hudscale" or cmd == "hudsize" or cmd == "scale" then
+    rest = trim(rest or "")
+    if rest == "" or rest == "show" then
+      printMsg(string.format(
+        "HUD size: %d%% (Options tab, Alt+wheel on HUD, or /gmbh hudscale 75-200)",
+        math.floor(UI:GetHudScale() * 100 + 0.5)
+      ))
+      return
+    end
+    if rest == "reset" or rest == "default" then
+      UI:ResetHudSize()
+      return
+    end
+    local pct = tonumber((rest:gsub("%%", "")))
+    if not pct then
+      printMsg("Usage: /gmbh hudscale <percent>  e.g. /gmbh hudscale 125  ·  corner-drag HUD to resize")
+      return
+    end
+    -- Accept 0.75–2.0 as scale or 75–200 as percent.
+    if pct <= HUD_SCALE_MAX + 0.01 then
+      UI:SetHudScale(pct)
+    else
+      UI:SetHudScale(pct / 100)
+    end
+    return
+  end
   if cmd == "target" or cmd == "hudtarget" or cmd == "testhud" then
     UI:SetHudTestTarget(rest)
   elseif cmd == "groups" or cmd == "group" then
