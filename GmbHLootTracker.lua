@@ -1934,6 +1934,35 @@ local HUD_SCALE_MIN = 0.75
 local HUD_SCALE_MAX = 2.0
 local HUD_SCALE_STEP = 0.25
 
+-- Keep resize hit-targets roughly constant on screen when HUD scale is small.
+local function refreshHudResizeHandles(frame)
+  if not frame then
+    return
+  end
+  local scale = frame:GetScale() or 1
+  if scale < 0.01 then
+    scale = 1
+  end
+  local gripSize = math.max(18, math.floor(28 / scale + 0.5))
+  local edgeThick = math.max(10, math.floor(16 / scale + 0.5))
+  local cornerClear = gripSize + 6
+  if frame.resizeGrip then
+    frame.resizeGrip:SetSize(gripSize, gripSize)
+  end
+  if frame.resizeBottom then
+    frame.resizeBottom:SetHeight(edgeThick)
+    frame.resizeBottom:ClearAllPoints()
+    frame.resizeBottom:SetPoint("BOTTOMLEFT", 4, 0)
+    frame.resizeBottom:SetPoint("BOTTOMRIGHT", -cornerClear, 0)
+  end
+  if frame.resizeRight then
+    frame.resizeRight:SetWidth(edgeThick)
+    frame.resizeRight:ClearAllPoints()
+    frame.resizeRight:SetPoint("TOPRIGHT", 0, -4)
+    frame.resizeRight:SetPoint("BOTTOMRIGHT", 0, cornerClear)
+  end
+end
+
 local function clampHudScale(scale)
   scale = tonumber(scale) or 1
   if scale < HUD_SCALE_MIN then
@@ -1957,6 +1986,7 @@ function UI:ApplyHudScale(frame)
     return
   end
   frame:SetScale(self:GetHudScale())
+  refreshHudResizeHandles(frame)
 end
 
 function UI:SetHudScale(scale, quiet)
@@ -2213,7 +2243,7 @@ function UI:EnsureAssignHud()
     scroll:SetVerticalScroll(math.max(0, math.min(max, cur - delta * 18)))
   end)
 
-  -- Shared resize loop: mode "both" (corner) or "height" (bottom edge).
+  -- Shared resize loop: "both" (corner), "height" (bottom), "width" (right).
   local function beginHudResize(mode)
     if f.IsProtected and f:IsProtected() then
       return
@@ -2241,9 +2271,11 @@ function UI:EnsureAssignHud()
       if frameScale < 0.01 then
         frameScale = 1
       end
-      local h = math.max(48, math.min(700, (top - my) / frameScale))
-      selfFrame:SetHeight(h)
-      if mode == "both" then
+      if mode == "height" or mode == "both" then
+        local h = math.max(48, math.min(700, (top - my) / frameScale))
+        selfFrame:SetHeight(h)
+      end
+      if mode == "width" or mode == "both" then
         local w = math.max(120, math.min(900, (mx - left) / frameScale))
         selfFrame:SetWidth(w)
         applyAssignHudContentWidth(selfFrame, w)
@@ -2255,7 +2287,7 @@ function UI:EnsureAssignHud()
   local bottomEdge = CreateFrame("Button", nil, f)
   bottomEdge:SetHeight(10)
   bottomEdge:SetPoint("BOTTOMLEFT", 4, 0)
-  bottomEdge:SetPoint("BOTTOMRIGHT", -20, 0)
+  bottomEdge:SetPoint("BOTTOMRIGHT", -28, 0)
   bottomEdge:SetFrameLevel((f:GetFrameLevel() or 0) + 4)
   bottomEdge:EnableMouse(true)
   local edgeTex = bottomEdge:CreateTexture(nil, "OVERLAY")
@@ -2278,11 +2310,38 @@ function UI:EnsureAssignHud()
   end)
   f.resizeBottom = bottomEdge
 
+  -- Right edge: drag to change width only (important when HUD scale is small).
+  local rightEdge = CreateFrame("Button", nil, f)
+  rightEdge:SetWidth(10)
+  rightEdge:SetPoint("TOPRIGHT", 0, -4)
+  rightEdge:SetPoint("BOTTOMRIGHT", 0, 28)
+  rightEdge:SetFrameLevel((f:GetFrameLevel() or 0) + 4)
+  rightEdge:EnableMouse(true)
+  local rightTex = rightEdge:CreateTexture(nil, "OVERLAY")
+  rightTex:SetPoint("TOPRIGHT", -2, 0)
+  rightTex:SetPoint("BOTTOMRIGHT", -2, 0)
+  rightTex:SetWidth(2)
+  rightTex:SetTexture("Interface\\Buttons\\WHITE8X8")
+  rightTex:SetVertexColor(0.45, 0.62, 0.82, 0.55)
+  rightEdge:SetScript("OnEnter", function()
+    rightTex:SetVertexColor(0.65, 0.82, 0.98, 0.95)
+  end)
+  rightEdge:SetScript("OnLeave", function()
+    rightTex:SetVertexColor(0.45, 0.62, 0.82, 0.55)
+  end)
+  rightEdge:SetScript("OnMouseDown", function(_, button)
+    if button and button ~= "LeftButton" then
+      return
+    end
+    beginHudResize("width")
+  end)
+  f.resizeRight = rightEdge
+
   -- Bottom-right corner: click and drag to resize width + height.
   local grip = CreateFrame("Button", nil, f)
   grip:SetSize(18, 18)
   grip:SetPoint("BOTTOMRIGHT", -1, 1)
-  grip:SetFrameLevel((f:GetFrameLevel() or 0) + 5)
+  grip:SetFrameLevel((f:GetFrameLevel() or 0) + 6)
   grip:EnableMouse(true)
   grip:RegisterForClicks("LeftButtonUp", "LeftButtonDown")
   local gripTex = grip:CreateTexture(nil, "OVERLAY")
@@ -2318,6 +2377,7 @@ function UI:EnsureAssignHud()
     beginHudResize("both")
   end)
   f.resizeGrip = grip
+  refreshHudResizeHandles(f)
 
   f:Hide()
   self.assignHud = f
@@ -3586,7 +3646,7 @@ function UI:Create()
 
   local optSizeHint = makeLabel(
     optionsPanel,
-    "Drag the bottom edge for height, or the corner for width+height. Alt+wheel also works.",
+    "Bottom edge = height, right edge = width, corner = both. Handles stay large when HUD is small.",
     11
   )
   optSizeHint:SetPoint("TOPLEFT", optSmaller, "BOTTOMLEFT", 0, -14)
