@@ -56,6 +56,7 @@ Example: `C'Thun | MT | Hardzor | Warrior | Tank`
 - `HelperData.lua` (filled by helper or `write_helperdata.py`; ships as nil)
 - `write_helperdata.py` â€” build HelperData from JSON or questions
 - `example_helperdata.json` â€” sample input for the script
+- `CURSEFORGE.md` â€” paste-ready CurseForge project description
 - `Libs/`
 - `Textures/`
 
