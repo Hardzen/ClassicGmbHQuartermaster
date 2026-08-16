@@ -7,15 +7,7 @@ GMBHRS — raid sheets, whispered to online guild members (all ranks).
 local PREFIX_WL = "GMBHWL"
 local PREFIX_RAID = "GMBHRS"
 local PRESENCE_PREFIX = "GMBHPR"
-local CHUNK_SIZE = 180
 local SHARE_COOLDOWN = 20
--- Per-batch chunk cap (addon message rate). Multiple batches cover the full list.
-local MAX_CHUNKS_PER_BATCH = 40
-local MAX_BATCHES = 80
--- Gargul/ChatThrottleLib paces ~0.08s; we stay conservative on whispers.
-local CHUNK_GAP = 0.12
-local BATCH_GAP = 1.5
-local OUT_GAP = 0.08
 local APPLY_LINES_PER_FRAME = 4
 local PRESENCE_TTL = 900
 local PRESENCE_ANNOUNCE_GAP = 120
@@ -143,8 +135,7 @@ local lastPresenceAnnounce = 0
 local presenceRefreshAt = 0
 local warnedNewerVersion = nil
 
--- pending receive by channel kind: "wl" | "raid"
-local pending = { wl = nil, raid = nil }
+-- AceComm-only bulk transfer (no BEGIN/CHUNK/END pending state).
 local lastShareAt = { wl = 0, raid = 0 }
 local lastReqAt = { wl = 0, raid = 0 }
 local lastRetryAt = { wl = 0, raid = 0 }
@@ -188,60 +179,8 @@ local function kindLabel(kind)
   return (kind == "raid") and "raid" or "wishlist"
 end
 
-local function pendingProgress(kind)
-  local pend = pending[kind]
-  if not pend then
-    return nil
-  end
-  local doneBatches = 0
-  local chunkGot, chunkTotal = 0, 0
-  for b = 1, pend.numBatches or 0 do
-    local batch = pend.batches and pend.batches[b]
-    if batch then
-      if batch.done then
-        doneBatches = doneBatches + 1
-      end
-      local total = tonumber(batch.total) or 0
-      chunkTotal = chunkTotal + total
-      for i = 1, total do
-        if batch.parts and batch.parts[i] then
-          chunkGot = chunkGot + 1
-        end
-      end
-    end
-  end
-  return {
-    from = pend.from,
-    numBatches = pend.numBatches or 0,
-    doneBatches = doneBatches,
-    chunkGot = chunkGot,
-    chunkTotal = chunkTotal,
-  }
-end
-
 function Sync.GetLiveStatus()
   for _, kind in ipairs({ "raid", "wl" }) do
-    local prog = pendingProgress(kind)
-    if prog then
-      if prog.numBatches > 1 then
-        return string.format(
-          "receiving %s from %s — batch %d/%d (%d/%d chunks)",
-          kindLabel(kind),
-          tostring(prog.from or "?"),
-          math.min(prog.doneBatches + 1, prog.numBatches),
-          prog.numBatches,
-          prog.chunkGot,
-          prog.chunkTotal
-        )
-      end
-      return string.format(
-        "receiving %s from %s — %d/%d chunks",
-        kindLabel(kind),
-        tostring(prog.from or "?"),
-        prog.chunkGot,
-        prog.chunkTotal
-      )
-    end
     if shareBusy[kind] then
       local targets = shareTargets[kind]
       if targets and #targets > 0 then
@@ -958,82 +897,24 @@ local function aceSharePayload(kind, rev, synced, lines, toPlayer, quiet)
   return true
 end
 
-local function sendOne(prefix, payload, target)
-  if not target or target == "" then
-    return false
-  end
-  if #payload > 250 then
-    return false
-  end
-  if C_ChatInfo and C_ChatInfo.SendAddonMessage then
-    C_ChatInfo.SendAddonMessage(prefix, payload, "WHISPER", target)
-  elseif SendAddonMessage then
-    SendAddonMessage(prefix, payload, "WHISPER", target)
-  else
-    return false
-  end
-  return true
-end
-
--- Control messages (ANN/REQ): AceComm when available (RAID/PARTY/GUILD or whisper).
-local outQueue = {}
-local outPumping = false
-
-local function pumpOutQueue()
-  if outPumping then
-    return
-  end
-  outPumping = true
-  local function step()
-    if #outQueue == 0 then
-      outPumping = false
-      return
-    end
-    local item = table.remove(outQueue, 1)
-    pcall(sendOne, item.prefix, item.payload, item.target)
-    after(OUT_GAP, step)
-  end
-  step()
-end
-
+-- Control messages (ANN/REQ): AceComm only (BULK share uses aceSharePayload).
 local function send(kind, payload, targets)
   if not IsInGuild() then
     return false, "not in a guild"
   end
-  -- Prefer AceComm: one group/guild message, or a single whisper.
-  if GmbHLootTrackerComm and GmbHLootTrackerComm.SendCommMessage then
-    if targets and #targets == 1 then
-      return aceSend(kind, payload, "WHISPER", targets[1], "NORMAL") and true or false
-    end
-    if not targets or #targets == 0 then
-      return aceSend(kind, payload, preferredDist(kind), nil, "NORMAL") and true or false
-    end
-    -- Explicit multi-target list: whisper each via AceComm (CTL-paced internally).
-    for _, target in ipairs(targets) do
-      aceSend(kind, payload, "WHISPER", target, "NORMAL")
-    end
-    return true
+  if not (GmbHLootTrackerComm and GmbHLootTrackerComm.SendCommMessage) then
+    return false, "AceComm required"
   end
-
-  if #payload > 250 then
-    return false, "payload too large"
+  if targets and #targets == 1 then
+    return aceSend(kind, payload, "WHISPER", targets[1], "NORMAL") and true or false
   end
-  local prefix = (kind == "raid") and PREFIX_RAID or PREFIX_WL
-  targets = targets or shareTargets[kind]
   if not targets or #targets == 0 then
-    targets = (kind == "raid") and listRaidSyncTargets() or listOnlineOfficers()
+    return aceSend(kind, payload, preferredDist(kind), nil, "NORMAL") and true or false
   end
-  if #targets == 0 then
-    return false, (kind == "raid") and "no raid/guild targets" or "no online targets"
-  end
+  -- Explicit multi-target list: whisper each via AceComm (CTL-paced internally).
   for _, target in ipairs(targets) do
-    outQueue[#outQueue + 1] = {
-      prefix = prefix,
-      payload = payload,
-      target = target,
-    }
+    aceSend(kind, payload, "WHISPER", target, "NORMAL")
   end
-  pumpOutQueue()
   return true
 end
 
@@ -1250,7 +1131,48 @@ local function encodeRaidLines(raids)
       raid.member_locked and "1" or "0",
       escField(raid.bug_trio_last),
     }, "|"))
-    -- Peer sync skips group roster / bench (keeps transfers smaller; HUD/assignments still sync).
+    for gi, group in ipairs(raid.groups or {}) do
+      if type(group) == "table" then
+        for si = 1, 5 do
+          local seat = group[si]
+          if type(seat) == "table" then
+            local seatName = seat.name or seat.player_name
+            if seatName and tostring(seatName) ~= "" then
+              table.insert(lines, table.concat({
+                "RGRP",
+                escField(slug),
+                tostring(gi),
+                tostring(si),
+                escField(seatName),
+                escField(seat.class),
+                escField(seat.class_color),
+                escField(seat.role),
+              }, "|"))
+            end
+          end
+        end
+      end
+    end
+    local benchCount = 0
+    for _, seat in ipairs(raid.bench or {}) do
+      if benchCount >= 80 then
+        break
+      end
+      if type(seat) == "table" then
+        local seatName = seat.name or seat.player_name
+        if seatName and tostring(seatName) ~= "" then
+          benchCount = benchCount + 1
+          table.insert(lines, table.concat({
+            "RBENCH",
+            escField(slug),
+            escField(seatName),
+            escField(seat.class),
+            escField(seat.class_color),
+            escField(seat.role),
+          }, "|"))
+        end
+      end
+    end
     for secIdx, section in ipairs(raid.sections or {}) do
       if type(section) == "table" then
         table.insert(lines, table.concat({
@@ -1413,9 +1335,7 @@ local function decodeRaidLines(blob)
           if si >= 1 and si <= MAX_SEAT then
             local group = ensureGroup(raid, gi)
             if group then
-              while #group < si do
-                table.insert(group, nil)
-              end
+              -- Never table.insert(nil): Lua 5.1 #t ignores nil holes → infinite while.
               group[si] = {
                 name = fields[5],
                 class = fields[6] ~= "" and fields[6] or nil,
@@ -1551,46 +1471,6 @@ local function buildRaidLines(data)
     end
   end
   return lines, #raidLines
-end
-
-local function chunkString(s)
-  local chunks = {}
-  local i = 1
-  while i <= #s do
-    table.insert(chunks, string.sub(s, i, i + CHUNK_SIZE - 1))
-    i = i + CHUNK_SIZE
-  end
-  return chunks
-end
-
--- Pack sorted lines into batches that each fit under MAX_CHUNKS_PER_BATCH.
-local function lineBatches(lines)
-  local batches = {}
-  local cur = {}
-  local function flush()
-    if #cur > 0 then
-      table.insert(batches, table.concat(cur, "\n"))
-      cur = {}
-    end
-  end
-  for _, line in ipairs(lines) do
-    table.insert(cur, line)
-    local chunks = chunkString(table.concat(cur, "\n"))
-    if #chunks > MAX_CHUNKS_PER_BATCH then
-      table.remove(cur)
-      flush()
-      table.insert(cur, line)
-      chunks = chunkString(table.concat(cur, "\n"))
-      if #chunks > MAX_CHUNKS_PER_BATCH then
-        -- Single oversized line — send alone (still may exceed; rare).
-        flush()
-        table.insert(batches, line)
-        cur = {}
-      end
-    end
-  end
-  flush()
-  return batches
 end
 
 function Sync.HasWishlistData()
@@ -1912,75 +1792,6 @@ function Sync.RequestRaid(opts)
   return true
 end
 
-local function sendBatch(kind, batches, batchIdx, rev, synced, targets, onComplete)
-  local blob = batches[batchIdx]
-  local chunks = chunkString(blob)
-  local numBatches = #batches
-  -- One recipient at a time (caller passes a single-target list).
-  send(kind, string.format(
-    "BEGIN|%s|%s|%d|%d|%d",
-    rev,
-    synced,
-    #chunks,
-    batchIdx,
-    numBatches
-  ), targets)
-  for i, chunk in ipairs(chunks) do
-    after((i - 1) * CHUNK_GAP, function()
-      send(kind, string.format("CHUNK|%d|%d|%s", batchIdx, i, chunk), targets)
-    end)
-  end
-  after(#chunks * CHUNK_GAP + 0.25, function()
-    send(kind, string.format("END|%s|%d|%d", rev, batchIdx, numBatches), targets)
-    if batchIdx < numBatches then
-      after(BATCH_GAP, function()
-        sendBatch(kind, batches, batchIdx + 1, rev, synced, targets, onComplete)
-      end)
-    elseif onComplete then
-      onComplete()
-    end
-  end)
-end
-
--- Gargul lesson: don't fan-out the same bulk payload to N whispers in parallel.
--- Finish the full transfer to target[i] before starting target[i+1].
-local function sendBatchesSerial(kind, batches, rev, synced, targets, quiet)
-  local ti = 1
-  local function nextTarget()
-    if ti > #targets then
-      shareBusy[kind] = false
-      shareTargets[kind] = nil
-      local label = (kind == "raid") and "raid sheet" or "wishlist"
-      local msg = string.format(
-        "Shared %s with %d player(s) (%d batches, rev %s).",
-        label,
-        #targets,
-        #batches,
-        string.sub(rev, 1, 8)
-      )
-      if not quiet then
-        printMsg(msg)
-      end
-      setSyncStatus(msg)
-      shareQuiet[kind] = false
-      return
-    end
-    local one = { targets[ti] }
-    ti = ti + 1
-    setSyncStatus(string.format(
-      "sharing %s with %s (%d/%d)…",
-      kindLabel(kind),
-      tostring(one[1] or "?"),
-      ti - 1,
-      #targets
-    ), { quiet = true })
-    sendBatch(kind, batches, 1, rev, synced, one, function()
-      after(0.4, nextTarget)
-    end)
-  end
-  nextTarget()
-end
-
 function Sync.Share(toPlayer, opts)
   opts = opts or {}
   local quiet = opts.quiet
@@ -2021,7 +1832,6 @@ function Sync.Share(toPlayer, opts)
   if type(data) ~= "table" then
     return false
   end
-  local targets
   if targeted then
     if not Sync.SenderAllowedWishlistSync(toPlayer) then
       if not quiet then
@@ -2032,11 +1842,8 @@ function Sync.Share(toPlayer, opts)
       end
       return false
     end
-    targets = { toPlayer }
-  else
-    targets = listOnlineOfficers()
   end
-  local lines, wlCount = buildWishlistLines(data)
+  local lines = buildWishlistLines(data)
   if #lines == 0 then
     if not quiet then
       printMsg("Wishlist is empty — nothing to share.")
@@ -2048,36 +1855,14 @@ function Sync.Share(toPlayer, opts)
   end
   local rev = tostring(data.revision or "")
   local synced = tostring(data.syncedAt or ""):gsub("|", "")
-  if GmbHLootTrackerComm and GmbHLootTrackerComm.SendCommMessage then
-    return aceSharePayload("wl", rev, synced, lines, targeted and toPlayer or nil, quiet)
-  end
-  if #targets == 0 then
+  -- Wishlist sync is AceComm only (same path as raid). No BEGIN/CHUNK/END.
+  if not (GmbHLootTrackerComm and GmbHLootTrackerComm.SendCommMessage) then
     if not quiet then
-      printMsg("No online officers to share with.")
+      printMsg("Wishlist share needs AceComm. Update/reinstall Classic GmbH Quartermaster.")
     end
     return false
   end
-  local batches = lineBatches(lines)
-  if #batches == 0 or #batches > MAX_BATCHES then
-    if not quiet and #batches > MAX_BATCHES then
-      printMsg("Wishlist still too large. Use the Windows helper instead.")
-    end
-    return false
-  end
-  shareBusy.wl = true
-  shareQuiet.wl = quiet and true or false
-  shareTargets.wl = targets
-  setSyncStatus(string.format("sharing wishlist with %d officer(s)…", #targets))
-  if not quiet then
-    printMsg(string.format(
-      "Sharing wishlist with %d officer(s) (%d lines, %d batches)…",
-      #targets,
-      wlCount,
-      #batches
-    ))
-  end
-  sendBatchesSerial("wl", batches, rev, synced, targets, quiet)
-  return true
+  return aceSharePayload("wl", rev, synced, lines, targeted and toPlayer or nil, quiet)
 end
 
 function Sync.ShareRaid(toPlayer, opts)
@@ -2299,7 +2084,7 @@ local function newRaidDecoder()
       if si >= 1 and si <= MAX_SEAT then
         local group = ensureGroup(raid, gi)
         if group then
-          while #group < si do table.insert(group, nil) end
+          -- Never table.insert(nil): Lua 5.1 #t ignores nil holes → infinite while.
           group[si] = {
             name = fields[5],
             class = fields[6] ~= "" and fields[6] or nil,
@@ -2444,106 +2229,14 @@ local function applySyncAsync(kind, revision, syncedAt, blob, fromPlayer)
   end)
 end
 
--- CHUNK path: stream chunks → lines without ever concatenating the full payload.
-local function applyRaidFromBatches(revision, syncedAt, batches, numBatches, fromPlayer)
-  setSyncStatus("applying raid…", { quiet = true })
-  local raids, feedLine = newRaidDecoder()
-  local bIdx, pIdx = 1, 1
-  local carry = ""
-  local needBatchSep = false
-  local f = CreateFrame("Frame")
-  f:SetScript("OnUpdate", function(self)
-    local budget = APPLY_LINES_PER_FRAME
-    while budget > 0 do
-      -- Flush remaining carry when all chunks are consumed.
-      if bIdx > numBatches then
-        if carry ~= "" then
-          if not skipRaidHeader(carry) then
-            local ok, err = pcall(feedLine, carry)
-            if not ok then
-              self:SetScript("OnUpdate", nil)
-              requestRetry("raid", fromPlayer, "Sync apply failed — retrying… (" .. tostring(err) .. ")")
-              return
-            end
-          end
-          carry = ""
-        end
-        self:SetScript("OnUpdate", nil)
-        for b = 1, numBatches do
-          if batches[b] then
-            batches[b].parts = nil
-          end
-        end
-        local ok, err = pcall(finishApply, "raid", revision, syncedAt, raids, {}, {}, fromPlayer)
-        if not ok then
-          requestRetry("raid", fromPlayer, "Sync apply failed — retrying… (" .. tostring(err) .. ")")
-        end
-        return
-      end
-
-      local batch = batches[bIdx]
-      if not batch or type(batch.parts) ~= "table" then
-        self:SetScript("OnUpdate", nil)
-        requestRetry("raid", fromPlayer, "Sync incomplete — missing batch " .. bIdx)
-        return
-      end
-      if pIdx > (tonumber(batch.total) or 0) then
-        bIdx = bIdx + 1
-        pIdx = 1
-        needBatchSep = true
-      else
-        local piece = batch.parts[pIdx]
-        batch.parts[pIdx] = nil
-        pIdx = pIdx + 1
-        if piece == nil then
-          self:SetScript("OnUpdate", nil)
-          requestRetry("raid", fromPlayer, "Sync incomplete — missing chunk in batch " .. bIdx)
-          return
-        end
-        local text = carry
-        if needBatchSep then
-          text = text .. "\n"
-          needBatchSep = false
-        end
-        text = text .. piece
-        carry = ""
-        local pos = 1
-        local tlen = #text
-        while budget > 0 and pos <= tlen do
-          local nl = string.find(text, "\n", pos, true)
-          if not nl then
-            carry = string.sub(text, pos)
-            break
-          end
-          local line = string.sub(text, pos, nl - 1)
-          pos = nl + 1
-          if not skipRaidHeader(line) then
-            local ok, err = pcall(feedLine, line)
-            if not ok then
-              self:SetScript("OnUpdate", nil)
-              requestRetry("raid", fromPlayer, "Sync apply failed — retrying… (" .. tostring(err) .. ")")
-              return
-            end
-            budget = budget - 1
-          end
-        end
-        if budget == 0 and pos <= tlen then
-          carry = string.sub(text, pos)
-        end
-      end
-    end
-  end)
-end
-
 local function applySync(kind, revision, syncedAt, blob, fromPlayer)
-  -- Always leave the CHAT_MSG_ADDON / AceComm stack before touching the blob.
+  -- Always leave the AceComm stack before touching the blob.
   after(0.75, function()
     applySyncAsync(kind, revision, syncedAt, blob, fromPlayer)
   end)
 end
 
 requestRetry = function(kind, fromPlayer, reason)
-  pending[kind] = nil
   if reason then
     printMsg(reason)
     setSyncStatus(reason)
@@ -2562,66 +2255,6 @@ requestRetry = function(kind, fromPlayer, reason)
       (kind == "wl") and Sync.LocalSyncedAt() or Sync.LocalRaidSyncedAt()
     ), { fromPlayer })
     setSyncStatus(string.format("retrying %s sync from %s…", kindLabel(kind), fromPlayer))
-  end)
-end
-
-local function tryFinishPending(kind)
-  local pend = pending[kind]
-  if not pend then
-    return
-  end
-  for b = 1, pend.numBatches do
-    local batch = pend.batches[b]
-    if not batch or not batch.done then
-      return
-    end
-  end
-  local fromPlayer = pend.from
-  local revision = pend.revision
-  local syncedAt = pend.syncedAt
-  local batches = pend.batches
-  local numBatches = pend.numBatches
-  pending[kind] = nil
-  setSyncStatus("applying " .. kindLabel(kind) .. "…", { quiet = true })
-
-  if kind == "raid" then
-    -- Never table.concat the full raid payload — stream chunks on later frames.
-    after(1.25, function()
-      applyRaidFromBatches(revision, syncedAt, batches, numBatches, fromPlayer)
-    end)
-    return
-  end
-
-  -- Wishlist is small; concat one batch per frame then apply.
-  after(1.0, function()
-    local buf = {}
-    local b = 1
-    local f = CreateFrame("Frame")
-    f:SetScript("OnUpdate", function(self)
-      if b > numBatches then
-        self:SetScript("OnUpdate", nil)
-        applySync(kind, revision, syncedAt, table.concat(buf, "\n"), fromPlayer)
-        return
-      end
-      local batch = batches[b]
-      if not batch then
-        self:SetScript("OnUpdate", nil)
-        requestRetry(kind, fromPlayer, "Sync incomplete — missing batch " .. b)
-        return
-      end
-      local parts = {}
-      for i = 1, batch.total do
-        if not batch.parts[i] then
-          self:SetScript("OnUpdate", nil)
-          requestRetry(kind, fromPlayer, "Sync incomplete — missing chunk " .. i .. " in batch " .. b)
-          return
-        end
-        parts[i] = batch.parts[i]
-        batch.parts[i] = nil
-      end
-      buf[b] = table.concat(parts)
-      b = b + 1
-    end)
   end)
 end
 
@@ -2743,186 +2376,7 @@ local function onKindAddonMessage(kind, message, channel, sender)
     return
   end
 
-  if cmd == "BEGIN" then
-    local rev, synced, total, batchIdx, numBatches = rest:match(
-      "^([^|]*)|([^|]*)|(%d+)|(%d+)|(%d+)$"
-    )
-    if not rev then
-      rev, synced, total = rest:match("^([^|]*)|([^|]*)|(%d+)$")
-      batchIdx, numBatches = 1, 1
-    end
-    total = tonumber(total) or 0
-    batchIdx = tonumber(batchIdx) or 1
-    numBatches = tonumber(numBatches) or 1
-    if total < 1 or total > MAX_CHUNKS_PER_BATCH then
-      return
-    end
-    if numBatches < 1 or numBatches > MAX_BATCHES then
-      return
-    end
-    if batchIdx < 1 or batchIdx > numBatches then
-      return
-    end
-    local pend = pending[kind]
-    -- Another sender mid-transfer: keep newer stamp, otherwise ignore interloper.
-    if pend and pend.from and not namesEqual(pend.from, sender) then
-      local incomplete = false
-      for b = 1, pend.numBatches or 0 do
-        local batch = pend.batches and pend.batches[b]
-        if not batch or not batch.done then
-          incomplete = true
-          break
-        end
-      end
-      if incomplete then
-        if syncedAtNewer(synced, pend.syncedAt) then
-          pending[kind] = nil
-          pend = nil
-        else
-          return
-        end
-      end
-    end
-    if not pend
-      or pend.revision ~= rev
-      or pend.from ~= sender
-      or pend.numBatches ~= numBatches
-    then
-      pending[kind] = {
-        revision = rev,
-        syncedAt = synced,
-        from = sender,
-        numBatches = numBatches,
-        batches = {},
-        activeBatch = batchIdx,
-      }
-      pend = pending[kind]
-      local msg = string.format(
-        "Receiving %s from %s (%d batches)…",
-        kind == "raid" and "raid sheet" or "wishlist",
-        sender or "?",
-        numBatches
-      )
-      if numBatches > 1 then
-        printMsg(msg)
-      end
-      setSyncStatus(msg)
-    else
-      -- Same transfer: if previous active batch never finished, abort + retry.
-      local prev = pend.activeBatch and pend.batches[pend.activeBatch]
-      if prev and not prev.done and pend.activeBatch ~= batchIdx then
-        requestRetry(
-          kind,
-          sender,
-          string.format(
-            "Sync incomplete — lost batch %d before batch %d started.",
-            pend.activeBatch,
-            batchIdx
-          )
-        )
-        return
-      end
-    end
-    pend = pending[kind]
-    if not pend then
-      return
-    end
-    pend.activeBatch = batchIdx
-    pend.batches[batchIdx] = { total = total, parts = {}, done = false }
-    setSyncStatus(Sync.GetLiveStatus(), { quiet = true })
-    return
-  end
-
-  if cmd == "CHUNK" then
-    local pend = pending[kind]
-    if not pend or (pend.from and not namesEqual(pend.from, sender)) then
-      return
-    end
-    -- New: CHUNK|batchIdx|chunkIdx|data  Old: CHUNK|chunkIdx|data
-    local batchIdx, idx, data = rest:match("^(%d+)|(%d+)|(.*)$")
-    if batchIdx and idx then
-      batchIdx = tonumber(batchIdx)
-      idx = tonumber(idx)
-    else
-      idx, data = rest:match("^(%d+)|(.*)$")
-      idx = tonumber(idx)
-      batchIdx = pend.activeBatch
-    end
-    if not batchIdx or not idx then
-      return
-    end
-    local target = pend.batches[batchIdx]
-    if not target then
-      -- Stale/out-of-order chunk — ignore rather than corrupting another batch.
-      return
-    end
-    if data ~= nil then
-      target.parts[idx] = data
-      -- Text-only status; never refresh UI mid-chunk.
-      if idx == 1 or (idx % 10) == 0 then
-        setSyncStatus(Sync.GetLiveStatus(), { quiet = true })
-      end
-    end
-    return
-  end
-
-  if cmd == "END" then
-    local pend = pending[kind]
-    if not pend or (pend.from and not namesEqual(pend.from, sender)) then
-      return
-    end
-    local rev, batchIdx, numBatches = rest:match("^([^|]*)|(%d+)|(%d+)$")
-    if not rev then
-      rev = rest
-      batchIdx, numBatches = 1, pend.numBatches or 1
-    end
-    batchIdx = tonumber(batchIdx) or pend.activeBatch or 1
-    if rev ~= pend.revision then
-      pending[kind] = nil
-      return
-    end
-    local batch = pend.batches[batchIdx]
-    if not batch then
-      -- Silent: usually a discarded interloper END.
-      return
-    end
-    for i = 1, batch.total do
-      if not batch.parts[i] then
-        requestRetry(
-          kind,
-          pend.from,
-          "Sync incomplete — missing chunk " .. i .. " (batch " .. batchIdx .. ")"
-        )
-        return
-      end
-    end
-    batch.done = true
-    if numBatches and tonumber(numBatches) > 1 then
-      local msg = string.format("Received batch %d/%d…", batchIdx, tonumber(numBatches))
-      printMsg(msg)
-      setSyncStatus(msg, { quiet = true })
-    else
-      setSyncStatus(Sync.GetLiveStatus(), { quiet = true })
-    end
-    -- Yield one frame before concat/apply so END handler returns quickly.
-    after(0.05, function()
-      tryFinishPending(kind)
-    end)
-  end
-end
-
-local function onAddonMessage(prefix, message, channel, sender)
-  if prefix == PRESENCE_PREFIX then
-    onPresenceMessage(prefix, message, channel, sender)
-    return
-  end
-  if prefix == PREFIX_WL then
-    onKindAddonMessage("wl", message, channel, sender)
-    return
-  end
-  if prefix == PREFIX_RAID then
-    onKindAddonMessage("raid", message, channel, sender)
-  end
+  -- Legacy BEGIN/CHUNK/END ignored (AceComm SYNC/SYNCZ only).
 end
 
 function Sync.Register()
@@ -2937,9 +2391,6 @@ function Sync.Register()
     end
     Comm:RegisterComm(PREFIX_WL, onComm)
     Comm:RegisterComm(PREFIX_RAID, onComm)
-  elseif C_ChatInfo and C_ChatInfo.RegisterAddonMessagePrefix then
-    C_ChatInfo.RegisterAddonMessagePrefix(PREFIX_WL)
-    C_ChatInfo.RegisterAddonMessagePrefix(PREFIX_RAID)
   end
   if C_ChatInfo and C_ChatInfo.RegisterAddonMessagePrefix then
     C_ChatInfo.RegisterAddonMessagePrefix(PRESENCE_PREFIX)
@@ -2995,11 +2446,9 @@ function Sync.Register()
   f:SetScript("OnEvent", function(_, event, ...)
     if event == "CHAT_MSG_ADDON" then
       local prefix, message, channel, sender = ...
-      -- AceComm owns GMBHWL / GMBHRS; only presence (and legacy fallback) here.
+      -- AceComm owns GMBHWL / GMBHRS; presence only on raw addon messages.
       if prefix == PRESENCE_PREFIX then
         onPresenceMessage(prefix, message, channel, sender)
-      elseif not (GmbHLootTrackerComm and GmbHLootTrackerComm.SendCommMessage) then
-        onAddonMessage(prefix, message, channel, sender)
       end
     elseif event == "PLAYER_ENTERING_WORLD" or event == "PLAYER_GUILD_UPDATE" then
       if GuildRoster then
