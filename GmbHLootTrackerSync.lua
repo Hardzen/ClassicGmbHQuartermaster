@@ -1028,16 +1028,36 @@ local function send(kind, payload, targets)
   return true
 end
 
--- Peer share stays thin: only players on the wishlist (not full eligible table).
+-- Peer share: on-wishlist players with officer table columns (IDs, class, last loot).
+-- Row wire (colon fields):
+--   v1: prio:name:lost
+--   v2: prio:name:lost:naxx:aq:total:class:role:color:lastId:lastName:lastDate:lastQ
+-- Item name may be "Name#sort_by" so receivers keep instance ID sorting.
+local function scrubPeerField(v)
+  return tostring(v or ""):gsub("[:%^%|\n\r#]", "")
+end
+
 local function encodeByItemLines(byItem, items)
   local lines = {}
   for itemId, rows in pairs(byItem or {}) do
     local name = ""
-    if items and items[tostring(itemId)] and items[tostring(itemId)].name then
-      name = tostring(items[tostring(itemId)].name)
+    local sortBy = ""
+    local meta = items and items[tostring(itemId)]
+    if type(meta) == "table" then
+      if meta.name then
+        name = tostring(meta.name)
+      end
+      if meta.sort_by then
+        sortBy = tostring(meta.sort_by)
+      end
     end
-    name = name:gsub("[%^%|\n]", " ")
-    local parts = { tostring(itemId), name }
+    name = scrubPeerField(name)
+    sortBy = scrubPeerField(sortBy)
+    local header = name
+    if sortBy ~= "" then
+      header = name .. "#" .. sortBy
+    end
+    local parts = { tostring(itemId), header }
     local any = false
     for _, r in ipairs(rows) do
       if not r.has_item then
@@ -1046,14 +1066,32 @@ local function encodeByItemLines(byItem, items)
           onList = r.priority ~= nil
         end
         if onList then
-          local pname = tostring(r.name or ""):gsub("[:%^%|\n]", "")
-          table.insert(parts, string.format(
-            "%s:%s:%s",
-            tostring(tonumber(r.priority) or 0),
-            pname,
-            tostring(tonumber(r.lost_rolls) or 0)
-          ))
-          any = true
+          local pname = scrubPeerField(r.name or r.player_name)
+          if pname ~= "" then
+            local naxx = tonumber(r.naxx_ids) or 0
+            local aq = tonumber(r.aq40_ids) or 0
+            local total = tonumber(r.total_ids)
+            if total == nil then
+              total = naxx + aq
+            end
+            table.insert(parts, string.format(
+              "%s:%s:%s:%s:%s:%s:%s:%s:%s:%s:%s:%s:%s",
+              tostring(tonumber(r.priority) or 0),
+              pname,
+              tostring(tonumber(r.lost_rolls) or 0),
+              tostring(naxx),
+              tostring(aq),
+              tostring(total),
+              scrubPeerField(r.class),
+              scrubPeerField(r.role),
+              scrubPeerField(r.class_color):gsub("^#", ""),
+              scrubPeerField(r.last_item_id),
+              scrubPeerField(r.last_item),
+              scrubPeerField(r.last_date),
+              scrubPeerField(r.last_quality)
+            ))
+            any = true
+          end
         end
       end
     end
@@ -1075,23 +1113,74 @@ local function decodeByItem(blob)
         table.insert(fields, part)
       end
       local itemId = fields[1]
-      local name = fields[2] or ""
+      local header = fields[2] or ""
       if itemId then
-        if name ~= "" then
-          items[itemId] = items[itemId] or { name = name }
-          items[itemId].name = name
+        local name, sortBy = header:match("^(.-)#([^#]*)$")
+        if not name then
+          name = header
+          sortBy = nil
+        end
+        if name ~= "" or sortBy then
+          items[itemId] = items[itemId] or {}
+          if name ~= "" then
+            items[itemId].name = name
+          end
+          if sortBy and sortBy ~= "" then
+            items[itemId].sort_by = sortBy
+          end
         end
         local rows = {}
         for i = 3, #fields do
-          local prio, pname, lost = fields[i]:match("^(%d+):([^:]+):(%d+)$")
-          if prio and pname then
-            table.insert(rows, {
-              name = pname,
-              priority = tonumber(prio) or 0,
-              lost_rolls = tonumber(lost) or 0,
+          local bits = {}
+          local rest = fields[i]
+          while true do
+            local a, b = rest:match("^([^:]*):(.*)$")
+            if not a then
+              table.insert(bits, rest)
+              break
+            end
+            table.insert(bits, a)
+            rest = b
+          end
+          if #bits >= 3 and bits[2] ~= "" then
+            local naxxN = tonumber(bits[4]) or 0
+            local aqN = tonumber(bits[5]) or 0
+            local totalN = tonumber(bits[6])
+            if totalN == nil then
+              totalN = naxxN + aqN
+            end
+            local row = {
+              name = bits[2],
+              priority = tonumber(bits[1]) or 0,
+              lost_rolls = tonumber(bits[3]) or 0,
+              naxx_ids = naxxN,
+              aq40_ids = aqN,
+              total_ids = totalN,
               has_item = false,
               on_wishlist = true,
-            })
+            }
+            if bits[7] and bits[7] ~= "" then
+              row.class = bits[7]
+            end
+            if bits[8] and bits[8] ~= "" then
+              row.role = bits[8]
+            end
+            if bits[9] and bits[9] ~= "" then
+              row.class_color = bits[9]
+            end
+            if bits[10] and bits[10] ~= "" then
+              row.last_item_id = tonumber(bits[10]) or bits[10]
+            end
+            if bits[11] and bits[11] ~= "" then
+              row.last_item = bits[11]
+            end
+            if bits[12] and bits[12] ~= "" then
+              row.last_date = bits[12]
+            end
+            if bits[13] and bits[13] ~= "" then
+              row.last_quality = tonumber(bits[13]) or bits[13]
+            end
+            table.insert(rows, row)
           end
         end
         byItem[itemId] = rows
