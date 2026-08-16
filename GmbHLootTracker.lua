@@ -174,6 +174,7 @@ local BOSS_NAME_HINTS = {
     { "fankriss", "Fankriss" },
     { "viscidus", "Viscidus" },
     { "huhuran", "Princess Huhuran" },
+    { "ouro", "Ouro" },
     { "vek'lor", "Twin Emperors" },
     { "vek'nilash", "Twin Emperors" },
     { "veklor", "Twin Emperors" },
@@ -356,6 +357,48 @@ local function raidData(slug)
   end
   slug = string.lower(slug or defaultRaid())
   return data.raids[slug]
+end
+
+-- After raidData/matchBossSectionLabel exist: resolve boss from target via hints + sheet titles.
+local function detectBossSectionLabelResolved(slug)
+  local hint = detectBossSectionLabel(slug)
+  if hint then
+    return hint
+  end
+  slug = string.lower(tostring(slug or ""))
+  local inst = instanceRaidSlug()
+  if not inst or inst ~= slug then
+    return nil
+  end
+  local raid = raidData(slug)
+  if type(raid) ~= "table" then
+    return nil
+  end
+  local sections = {}
+  for _, section in ipairs(raid.sections or {}) do
+    if tostring(section.label or "") ~= "" then
+      table.insert(sections, section)
+    end
+  end
+  for _, a in ipairs(raid.assignments or {}) do
+    local sec = tostring(a.section_label or "")
+    if sec ~= "" then
+      table.insert(sections, { label = sec })
+    end
+  end
+  local units = { "target", "focus", "mouseover" }
+  for _, u in ipairs(units) do
+    if UnitExists and UnitExists(u) then
+      local unitName = UnitName(u)
+      if unitName and unitName ~= "" then
+        local matched = matchBossSectionLabel(sections, unitName)
+        if matched then
+          return matched
+        end
+      end
+    end
+  end
+  return nil
 end
 
 local function resolveHudTestBoss(query)
@@ -1325,7 +1368,7 @@ function UI:ApplyInstanceBossView(opts)
   if not inst or inst ~= slug then
     return false
   end
-  local want = detectBossSectionLabel(slug)
+  local want = detectBossSectionLabelResolved(slug)
   if not want then
     return false
   end
@@ -1872,15 +1915,14 @@ function UI:GetPersonalBossAssignmentLines()
   if not testBoss and not inst then
     return nil, nil, false
   end
-  local slug = testSlug or preferredRaidSlug()
-  if not testBoss and slug ~= inst then
-    return nil, nil, false
-  end
+  -- Always prefer the instance you are standing in (not "next upcoming" defaultRaid).
+  local slug = testSlug or inst or preferredRaidSlug()
   local raid = raidData(slug)
-  if not raid or raid.member_locked or not raid.has_sheet then
+  if not raid or not raid.has_sheet then
     return nil, nil, false
   end
-  local want = testBoss or detectBossSectionLabel(slug)
+  -- Locked member sheets still show HUD for targeted bosses (assignments may be empty).
+  local want = testBoss or detectBossSectionLabelResolved(slug)
   if not want and self.raidView and string.sub(tostring(self.raidView), 1, 5) == "boss:" then
     want = string.sub(self.raidView, 6)
   end
@@ -1893,6 +1935,12 @@ function UI:GetPersonalBossAssignmentLines()
   local full = canViewFullBossAssignments()
   if not want then
     return {}, nil, full
+  end
+  if raid.member_locked and not testBoss then
+    -- Still open HUD so targeting a boss does something visible.
+    return {
+      "|cffcc8844Raid sheet not announced yet — assignments hidden.|r",
+    }, want, full
   end
   local generalSections, tankingSections, bossSections = self:CollectRaidSections(raid)
   local allSections = {}
@@ -2423,12 +2471,22 @@ function UI:RefreshAssignHud()
     f:Hide()
     return
   end
+  -- Targeting a boss should reopen the HUD even if it was hidden via /gmbh hud.
+  local slug = self.hudTestSlug or inst
+  if slug and detectBossSectionLabelResolved(slug) then
+    f._userHidden = false
+  end
   if f._userHidden then
     f:Hide()
     return
   end
   local lines, bossLabel, full = self:GetPersonalBossAssignmentLines()
   if lines == nil then
+    f:Hide()
+    return
+  end
+  -- No boss context yet (not targeting / wrong wing) → keep HUD closed.
+  if not bossLabel and not self.hudTestBoss then
     f:Hide()
     return
   end
@@ -2813,47 +2871,71 @@ local function canEditRaidGroups()
   return true
 end
 
-local function snapshotRaidRoster()
-  local byName = {}
-  local counts = { 0, 0, 0, 0, 0, 0, 0, 0 }
+-- Anyone in the raid currently in combat (MRT refuses to sort in that case).
+local function raidCombatBlockers()
   local n = GetNumGroupMembers and GetNumGroupMembers() or 0
+  local blocked = {}
   for i = 1, n do
-    local name, _, subgroup = GetRaidRosterInfo(i)
-    if name and subgroup then
-      local key = barePlayerName(name)
-      byName[key] = { index = i, subgroup = subgroup, name = name }
-      if subgroup >= 1 and subgroup <= 8 then
-        counts[subgroup] = counts[subgroup] + 1
+    local unit = "raid" .. i
+    if UnitAffectingCombat and UnitAffectingCombat(unit) then
+      local name = UnitName(unit)
+      if name and name ~= "" then
+        table.insert(blocked, name)
       end
     end
   end
-  return byName, counts
+  if #blocked == 0 then
+    return nil
+  end
+  return table.concat(blocked, ", ")
 end
 
-local function desiredGroupsFromSheet(raid)
-  local want = {} -- bareName -> subgroup
-  local listed = 0
-  for gi, group in ipairs(raid.groups or {}) do
-    for _, seat in ipairs(group or {}) do
-      local nm = seat and seat.name
-      if nm and tostring(nm) ~= "" then
-        local key = barePlayerName(nm)
-        if key ~= "" and not want[key] then
-          want[key] = gi
-          listed = listed + 1
+-- Flat 40-slot list like MRT Raid Groups: (g-1)*5 + seat → roster name.
+-- Prefer exact seat order from the sheet so KeepPos can rebuild G1–G8 layout.
+local function buildMrtStyleGroupList(raid)
+  local list = {}
+  local rosterBare = {}
+  local n = GetNumGroupMembers and GetNumGroupMembers() or 0
+  for i = 1, n do
+    local name = GetRaidRosterInfo(i)
+    if name then
+      rosterBare[barePlayerName(name)] = name
+    end
+  end
+  for gi = 1, 8 do
+    local seats = raid.groups and raid.groups[gi] or {}
+    for seat = 1, 5 do
+      local idx = (gi - 1) * 5 + seat
+      local cell = seats[seat]
+      local sheetName = nil
+      if type(cell) == "table" then
+        sheetName = cell.name or cell.player_name
+      elseif type(cell) == "string" then
+        sheetName = cell
+      end
+      if sheetName and tostring(sheetName) ~= "" then
+        local rosterName = rosterBare[barePlayerName(sheetName)]
+        if rosterName then
+          list[idx] = rosterName
         end
       end
     end
   end
-  return want, listed
+  return list
 end
 
 function UI:StopRaidSort(msg)
   if self._raidSortFrame then
+    self._raidSortFrame:UnregisterEvent("GROUP_ROSTER_UPDATE")
+    self._raidSortFrame:SetScript("OnEvent", nil)
     self._raidSortFrame:SetScript("OnUpdate", nil)
   end
   self._raidSortBusy = false
-  self._raidSortQueue = nil
+  self._raidSortNeedGroup = nil
+  self._raidSortNeedPos = nil
+  self._raidSortLocked = nil
+  self._raidSortGroupsReady = false
+  self._raidSortGroupWithRL = 0
   if self.sortRaidBtn then
     self.sortRaidBtn:Enable()
     self.sortRaidBtn:SetText("Sort raid")
@@ -2863,6 +2945,9 @@ function UI:StopRaidSort(msg)
   end
 end
 
+-- MRT RaidGroups:ApplyGroups + ProcessRoster (KeepPosInGroup on).
+-- 1) Move players into the correct subgroups (SetRaidSubgroup / SwapRaidSubgroup).
+-- 2) Fix seat order inside each group via a 3-way swap bridge.
 function UI:SortRaidFromSheet()
   if self._raidSortBusy then
     printMsg("Raid sort already running…")
@@ -2871,6 +2956,11 @@ function UI:SortRaidFromSheet()
   local ok, why = canEditRaidGroups()
   if not ok then
     printMsg(why)
+    return
+  end
+  local combat = raidCombatBlockers()
+  if combat then
+    printMsg("Players in combat — wait: " .. combat)
     return
   end
   local slug = preferredRaidSlug()
@@ -2884,63 +2974,74 @@ function UI:SortRaidFromSheet()
     return
   end
 
-  local want, listed = desiredGroupsFromSheet(raid)
-  if listed == 0 then
-    printMsg("Raid-sheet groups are empty.")
-    return
-  end
+  local list = buildMrtStyleGroupList(raid)
+  local rlName, _, rlGroup = GetRaidRosterInfo(1)
+  local needGroup = {}
+  local needPosInGroup = {}
+  local isRLfound = false
+  local listed = 0
 
-  local roster = select(1, snapshotRaidRoster())
-  local missing, already, toMove = 0, 0, 0
-  for key, g in pairs(want) do
-    local cur = roster[key]
-    if not cur then
-      missing = missing + 1
-    elseif cur.subgroup == g then
-      already = already + 1
-    else
-      toMove = toMove + 1
+  for i = 1, 8 do
+    local pos = 1
+    for j = 1, 5 do
+      local name = list[(i - 1) * 5 + j]
+      if name and rlName and barePlayerName(name) == barePlayerName(rlName) then
+        needGroup[name] = i
+        needPosInGroup[name] = pos
+        pos = pos + 1
+        isRLfound = true
+        listed = listed + 1
+        break
+      end
+    end
+    for j = 1, 5 do
+      local name = list[(i - 1) * 5 + j]
+      if name and (not rlName or barePlayerName(name) ~= barePlayerName(rlName)) then
+        needGroup[name] = i
+        needPosInGroup[name] = pos
+        pos = pos + 1
+        listed = listed + 1
+      end
     end
   end
-  if toMove == 0 then
-    printMsg(string.format(
-      "Raid already matches sheet groups (%d placed, %d not in raid).",
-      already,
-      missing
-    ))
+
+  if listed == 0 then
+    printMsg("No sheet players are in this raid yet.")
     return
   end
 
   self._raidSortBusy = true
-  self._raidSortPasses = 0
+  self._raidSortNeedGroup = needGroup
+  self._raidSortNeedPos = needPosInGroup
+  self._raidSortLocked = {}
+  self._raidSortGroupsReady = false
+  self._raidSortGroupWithRL = isRLfound and 0 or (rlGroup or 0)
   self._raidSortMoved = 0
-  self._raidSortWant = want
+  self._raidSortPasses = 0
+
   if self.sortRaidBtn then
     self.sortRaidBtn:Disable()
     self.sortRaidBtn:SetText("Sorting…")
   end
   printMsg(string.format(
-    "Sorting raid to sheet groups (%d to move, %d ok, %d missing)…",
-    toMove,
-    already,
-    missing
+    "Sorting raid to sheet groups (MRT-style, %d players, keep seat order)…",
+    listed
   ))
 
   if not self._raidSortFrame then
     self._raidSortFrame = CreateFrame("Frame")
   end
-  local elapsed = 0.2
-  self._raidSortFrame:SetScript("OnUpdate", function(_, dt)
-    elapsed = elapsed + dt
-    if elapsed < 0.18 then
-      return
+  self._raidSortFrame:RegisterEvent("GROUP_ROSTER_UPDATE")
+  self._raidSortFrame:SetScript("OnEvent", function(_, event)
+    if event == "GROUP_ROSTER_UPDATE" and UI._raidSortBusy then
+      UI:_RaidSortProcess()
     end
-    elapsed = 0
-    UI:_RaidSortTick()
   end)
+  -- Kick immediately; further steps wait for roster events (like MRT).
+  self:_RaidSortProcess()
 end
 
-function UI:_RaidSortTick()
+function UI:_RaidSortProcess()
   if not self._raidSortBusy then
     return
   end
@@ -2949,73 +3050,183 @@ function UI:_RaidSortTick()
     self:StopRaidSort(why)
     return
   end
-
-  local want = self._raidSortWant or {}
-  local roster, counts = snapshotRaidRoster()
-
-  -- Find someone in the wrong subgroup.
-  local moverKey, mover, targetG = nil, nil, nil
-  for key, g in pairs(want) do
-    local cur = roster[key]
-    if cur and cur.subgroup ~= g then
-      moverKey, mover, targetG = key, cur, g
-      break
-    end
+  local combat = raidCombatBlockers()
+  if combat then
+    self:StopRaidSort("Combat started — sort aborted: " .. combat)
+    return
   end
 
-  if not mover then
-    self:StopRaidSort(string.format(
-      "Raid sort done (%d moves).",
-      self._raidSortMoved or 0
-    ))
+  local needGroup = self._raidSortNeedGroup
+  local needPosInGroup = self._raidSortNeedPos
+  local lockedUnit = self._raidSortLocked
+  if not needGroup then
     return
   end
 
   self._raidSortPasses = (self._raidSortPasses or 0) + 1
-  if self._raidSortPasses > 120 then
+  if self._raidSortPasses > 200 then
     self:StopRaidSort("Raid sort stopped (too many passes — try again).")
     return
   end
 
-  -- Target group has a free seat → direct move.
-  if (counts[targetG] or 0) < 5 then
-    SetRaidSubgroup(mover.index, targetG)
-    self._raidSortMoved = (self._raidSortMoved or 0) + 1
-    return
-  end
+  local currentGroup = {}
+  local currentPos = {}
+  local nameToID = {}
+  local groupSize = { 0, 0, 0, 0, 0, 0, 0, 0 }
 
-  -- Otherwise swap with someone in the target group who does not belong there
-  -- (or belongs elsewhere on the sheet).
-  local swapWith = nil
-  for key, cur in pairs(roster) do
-    if cur.subgroup == targetG then
-      local should = want[key]
-      if not should or should ~= targetG then
-        swapWith = cur
-        break
+  local function resolveNeedKey(rosterName)
+    if needGroup[rosterName] then
+      return rosterName
+    end
+    local bare = barePlayerName(rosterName)
+    for key in pairs(needGroup) do
+      if barePlayerName(key) == bare then
+        return key
       end
     end
-  end
-  if not swapWith then
-    -- Every seat in target is "correct" but we're full and mover still wrong —
-    -- swap with anyone in target to break deadlock, then next ticks fix.
-    for _, cur in pairs(roster) do
-      if cur.subgroup == targetG and cur.index ~= mover.index then
-        swapWith = cur
-        break
+    if rosterName:find("%-", 1, true) then
+      local short = rosterName:match("^([^%-]+)")
+      if short and needGroup[short] then
+        return short
       end
+    end
+    return rosterName
+  end
+
+  -- Mirror MRT ProcessRoster roster scan (subgroup size = seat index in group).
+  local n = GetNumGroupMembers and GetNumGroupMembers() or 0
+  for i = 1, n do
+    local name, _, subgroup = GetRaidRosterInfo(i)
+    if name and subgroup and subgroup >= 1 and subgroup <= 8 then
+      local key = resolveNeedKey(name)
+      currentGroup[key] = subgroup
+      nameToID[key] = i
+      groupSize[subgroup] = groupSize[subgroup] + 1
+      currentPos[key] = groupSize[subgroup]
     end
   end
 
-  if swapWith and SwapRaidSubgroup then
-    SwapRaidSubgroup(mover.index, swapWith.index)
-    self._raidSortMoved = (self._raidSortMoved or 0) + 1
-  elseif (counts[targetG] or 0) < 5 then
-    SetRaidSubgroup(mover.index, targetG)
-    self._raidSortMoved = (self._raidSortMoved or 0) + 1
-  else
-    self:StopRaidSort("Could not free a seat in G" .. tostring(targetG) .. " — sort aborted.")
+  if not self._raidSortGroupsReady then
+    local waitForGroup = false
+    for unit, group in pairs(needGroup) do
+      local cur = currentGroup[unit]
+      if cur and cur ~= group then
+        if (groupSize[group] or 0) < 5 then
+          local id = nameToID[unit]
+          if id then
+            SetRaidSubgroup(id, group)
+            groupSize[cur] = (groupSize[cur] or 0) - 1
+            groupSize[group] = (groupSize[group] or 0) + 1
+            self._raidSortMoved = (self._raidSortMoved or 0) + 1
+            waitForGroup = true
+          end
+        end
+      end
+    end
+    if waitForGroup then
+      return
+    end
+
+    local setToSwap = {}
+    local waitForSwap = false
+    if SwapRaidSubgroup then
+      for unit, group in pairs(needGroup) do
+        if not setToSwap[unit] and currentGroup[unit] and currentGroup[unit] ~= group then
+          local unitToSwap = nil
+          for unit2, group2 in pairs(currentGroup) do
+            if not setToSwap[unit2] and group2 == group and needGroup[unit2] ~= group2 then
+              unitToSwap = unit2
+              break
+            end
+          end
+          if unitToSwap and nameToID[unit] and nameToID[unitToSwap] then
+            SwapRaidSubgroup(nameToID[unit], nameToID[unitToSwap])
+            self._raidSortMoved = (self._raidSortMoved or 0) + 1
+            waitForSwap = true
+            setToSwap[unit] = true
+            setToSwap[unitToSwap] = true
+          end
+        end
+      end
+    end
+    if waitForSwap then
+      return
+    end
+
+    self._raidSortGroupsReady = true
   end
+
+  -- Phase 2: seat order inside groups (MRT KeepPosInGroup / 3-way bridge swap).
+  do
+    local setToSwap = {}
+    local waitForSwap = false
+    local groupWithRL = self._raidSortGroupWithRL or 0
+    if SwapRaidSubgroup then
+      for unit, pos in pairs(needPosInGroup or {}) do
+        local wantPos = pos
+        if currentGroup[unit] == groupWithRL then
+          wantPos = pos + 1
+        end
+        if not lockedUnit[unit]
+          and currentPos[unit]
+          and currentPos[unit] ~= wantPos
+          and nameToID[unit]
+          and nameToID[unit] ~= 1
+          and not setToSwap[unit]
+        then
+          local unitToSwapBridge = nil
+          for unit2, group2 in pairs(currentGroup) do
+            if group2 ~= currentGroup[unit]
+              and nameToID[unit2]
+              and nameToID[unit2] ~= 1
+              and not setToSwap[unit2]
+            then
+              unitToSwapBridge = unit2
+              break
+            end
+          end
+
+          local unitToSwap = nil
+          for unit2, pos2 in pairs(currentPos) do
+            if currentGroup[unit2] == currentGroup[unit]
+              and pos2 == wantPos
+              and nameToID[unit2]
+              and nameToID[unit2] ~= 1
+              and not setToSwap[unit2]
+            then
+              unitToSwap = unit2
+              break
+            end
+          end
+
+          if unitToSwap and unitToSwapBridge then
+            lockedUnit[unit] = true
+            SwapRaidSubgroup(nameToID[unit], nameToID[unitToSwapBridge])
+            SwapRaidSubgroup(nameToID[unitToSwapBridge], nameToID[unitToSwap])
+            SwapRaidSubgroup(nameToID[unit], nameToID[unitToSwapBridge])
+            self._raidSortMoved = (self._raidSortMoved or 0) + 1
+            waitForSwap = true
+            setToSwap[unit] = true
+            setToSwap[unitToSwap] = true
+            setToSwap[unitToSwapBridge] = true
+          end
+        end
+      end
+    end
+    if waitForSwap then
+      return
+    end
+  end
+
+  self:StopRaidSort(string.format(
+    "Raid sort done (%d moves) — groups match the sheet.",
+    self._raidSortMoved or 0
+  ))
+end
+
+-- Back-compat name used by older OnUpdate hook (if any).
+function UI:_RaidSortTick()
+  self:_RaidSortProcess()
 end
 
 function UI:RenderRaidGroupsView(raid)
