@@ -1049,9 +1049,7 @@ local function encodeRaidLines(raids)
       raid.member_locked and "1" or "0",
       escField(raid.bug_trio_last),
     }, "|"))
-    -- Assignments first (RSEC/RSLOT/RASN). Groups/bench appended after so older
-    -- clients still get a usable sheet if a late batch is dropped, and so unknown
-    -- RGRP/RBENCH kinds are ignored without breaking assignment decode.
+    -- Peer sync skips group roster / bench (keeps transfers smaller; HUD/assignments still sync).
     for secIdx, section in ipairs(raid.sections or {}) do
       if type(section) == "table" then
         table.insert(lines, table.concat({
@@ -1118,39 +1116,6 @@ local function encodeRaidLines(raids)
             escField(a.role),
           }, "|"))
         end
-      end
-    end
-    -- Groups/bench last — existing decode format; empty seats omitted.
-    for gi, group in ipairs(raid.groups or {}) do
-      if type(group) == "table" then
-        local seatCount = math.max(#group, 5)
-        for si = 1, seatCount do
-          local seat = group[si]
-          if type(seat) == "table" and seat.name and tostring(seat.name) ~= "" then
-            table.insert(lines, table.concat({
-              "RGRP",
-              escField(slug),
-              tostring(gi),
-              tostring(si),
-              escField(seat.name),
-              escField(seat.class),
-              escField(seat.class_color),
-              escField(seat.role),
-            }, "|"))
-          end
-        end
-      end
-    end
-    for _, seat in ipairs(raid.bench or {}) do
-      if type(seat) == "table" and seat.name and tostring(seat.name) ~= "" then
-        table.insert(lines, table.concat({
-          "RBENCH",
-          escField(slug),
-          escField(seat.name),
-          escField(seat.class),
-          escField(seat.class_color),
-          escField(seat.role),
-        }, "|"))
       end
     end
   end
