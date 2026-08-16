@@ -820,6 +820,23 @@ local function preferredDist(kind)
   return "GUILD"
 end
 
+-- Must be declared before aceSharePayload (otherwise `after` resolves to a nil global).
+local function after(seconds, fn)
+  if C_Timer and C_Timer.After then
+    C_Timer.After(seconds, fn)
+    return
+  end
+  local t = 0
+  local f = CreateFrame("Frame")
+  f:SetScript("OnUpdate", function(self, elapsed)
+    t = t + elapsed
+    if t >= seconds then
+      self:SetScript("OnUpdate", nil)
+      fn()
+    end
+  end)
+end
+
 local function aceSend(kind, payload, distribution, target, prio)
   local Comm = GmbHLootTrackerComm
   if not Comm or not Comm.SendCommMessage then
@@ -947,23 +964,6 @@ local function sendOne(prefix, payload, target)
     return false
   end
   return true
-end
-
-local after
-after = function(seconds, fn)
-  if C_Timer and C_Timer.After then
-    C_Timer.After(seconds, fn)
-    return
-  end
-  local t = 0
-  local f = CreateFrame("Frame")
-  f:SetScript("OnUpdate", function(self, elapsed)
-    t = t + elapsed
-    if t >= seconds then
-      self:SetScript("OnUpdate", nil)
-      fn()
-    end
-  end)
 end
 
 -- Control messages (ANN/REQ): AceComm when available (RAID/PARTY/GUILD or whisper).
