@@ -243,8 +243,15 @@ function Sync.GetLiveStatus()
       )
     end
     if shareBusy[kind] then
-      local n = shareTargets[kind] and #shareTargets[kind] or 0
-      return string.format("sharing %s with %d player(s)…", kindLabel(kind), n)
+      local targets = shareTargets[kind]
+      if targets and #targets > 0 then
+        return string.format("sharing %s with %d player(s)…", kindLabel(kind), #targets)
+      end
+      -- AceComm GUILD/RAID/PARTY blast has no whisper target list — keep setSyncStatus text.
+      if syncStatusText and syncStatusText ~= "" and (GetTime() - syncStatusAt) < 60 then
+        return syncStatusText
+      end
+      return string.format("sharing %s…", kindLabel(kind))
     end
   end
   if syncStatusText and syncStatusText ~= "" and (GetTime() - syncStatusAt) < 12 then
@@ -916,6 +923,7 @@ local function aceSharePayload(kind, rev, synced, lines, toPlayer, quiet)
 
   local prefix = (kind == "raid") and PREFIX_RAID or PREFIX_WL
   if toPlayer and tostring(toPlayer) ~= "" then
+    shareTargets[kind] = { toPlayer }
     setSyncStatus(string.format("sharing %s with %s…", kindLabel(kind), tostring(toPlayer)))
     if not quiet then
       printMsg(string.format(
@@ -933,6 +941,7 @@ local function aceSharePayload(kind, rev, synced, lines, toPlayer, quiet)
   end
 
   local dist = preferredDist(kind)
+  shareTargets[kind] = nil
   setSyncStatus(string.format("sharing %s on %s…", kindLabel(kind), dist))
   if not quiet then
     printMsg(string.format(
