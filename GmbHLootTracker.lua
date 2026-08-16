@@ -3449,7 +3449,78 @@ local function updateMinimapButtonPosition(btn)
   btn:SetPoint("CENTER", Minimap, "CENTER", math.cos(angle) * radius, math.sin(angle) * radius)
 end
 
+local MINIMAP_ICON_PATH = "Interface\\AddOns\\ClassicGmbHQuartermaster\\Textures\\minimap_icon"
+local LDB_OBJECT_NAME = "ClassicGmbHQuartermaster"
+
+local function registerMinimapCollectors()
+  -- LibDataBroker launcher → SlideBar (and similar collectors) pick this up automatically.
+  local LDB = LibStub and LibStub("LibDataBroker-1.1", true)
+  if LDB and not UI._ldbObject then
+    UI._ldbObject = LDB:NewDataObject(LDB_OBJECT_NAME, {
+      type = "launcher",
+      icon = MINIMAP_ICON_PATH,
+      label = "Classic GmbH Quartermaster",
+      tocname = ADDON_NAME,
+      OnClick = function(_, button)
+        if button == "RightButton" then
+          UI:ToggleAssignHud()
+          return
+        end
+        UI:Create()
+        UI:Toggle()
+      end,
+      OnTooltipShow = function(tt)
+        if not tt or not tt.AddLine then
+          return
+        end
+        tt:AddLine("Classic GmbH Quartermaster", 0.95, 0.88, 0.55)
+        tt:AddLine("Left-click: open window", 0.75, 0.80, 0.88)
+        tt:AddLine("Right-click: toggle assignment HUD", 0.75, 0.80, 0.88)
+      end,
+    })
+  end
+
+  -- Direct SlideBar registration (Norganna bar with the yellow edge).
+  local SlideBar = LibStub and LibStub("SlideBar", true)
+  if SlideBar and SlideBar.AddButton and not UI._slideBarRegistered then
+    SlideBar.AddButton(
+      LDB_OBJECT_NAME,
+      MINIMAP_ICON_PATH,
+      60,
+      "GmbHLootTrackerSlideBarButton",
+      true,
+      UI._ldbObject
+    )
+    UI._slideBarRegistered = true
+  end
+
+  -- MinimapButtonBag (MBB) include list, if present.
+  if type(MBB_RegisterButton) == "function" and not UI._mbbRegistered then
+    MBB_RegisterButton("GmbHLootTrackerMinimapButton")
+    UI._mbbRegistered = true
+  elseif type(MBB_Include) == "table" and not UI._mbbRegistered then
+    local name = "GmbHLootTrackerMinimapButton"
+    local found = false
+    for _, n in ipairs(MBB_Include) do
+      if n == name then
+        found = true
+        break
+      end
+    end
+    if not found then
+      table.insert(MBB_Include, name)
+    end
+    UI._mbbRegistered = true
+    if type(MBB_AddButton) == "function" then
+      MBB_AddButton(name)
+    elseif type(MBB_GatherIcons) == "function" then
+      MBB_GatherIcons()
+    end
+  end
+end
+
 function UI:EnsureMinimapButton()
+  registerMinimapCollectors()
   if self.minimapBtn then
     updateMinimapButtonPosition(self.minimapBtn)
     if charDB().minimapHidden then
@@ -3475,7 +3546,7 @@ function UI:EnsureMinimapButton()
 
   -- Discord bot logo (circular TGA). Inset so the tracking border frames it.
   local icon = btn:CreateTexture(nil, "BACKGROUND")
-  icon:SetTexture("Interface\\AddOns\\ClassicGmbHQuartermaster\\Textures\\minimap_icon")
+  icon:SetTexture(MINIMAP_ICON_PATH)
   icon:SetSize(21, 21)
   icon:SetPoint("CENTER", 0, 0)
   btn.icon = icon
@@ -3536,6 +3607,7 @@ function UI:EnsureMinimapButton()
   else
     btn:Show()
   end
+  registerMinimapCollectors()
   return btn
 end
 
@@ -4254,6 +4326,10 @@ boot:SetScript("OnEvent", function(_, event, arg1)
         UI.assignHud._posApplied = true
         UI:RefreshAssignHud()
       end
+      UI:EnsureMinimapButton()
+    end)
+    -- SlideBar / MBB may finish later than us — re-register once more.
+    C_Timer.After(1, function()
       UI:EnsureMinimapButton()
     end)
   end
