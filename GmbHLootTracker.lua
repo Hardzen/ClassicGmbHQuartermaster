@@ -1581,7 +1581,8 @@ local function isCthunSection(section)
   return lab == "c'thun" or lab == "cthun"
 end
 
--- Members: only their raid target icon. Officers/RL: each mark + players on it.
+-- Members: only their raid target icon. Officers/RL: each mark + melee on it
+-- (same 2-per-stack as the C'Thun map). Healers/casters stay off the mark lines.
 function UI:CollectCthunHudLines(section, full)
   if type(section) ~= "table" then
     return {}
@@ -1591,14 +1592,40 @@ function UI:CollectCthunHudLines(section, full)
   local farNames = {}
   local myMark = nil
 
+  local function isFarSlot(slot, board)
+    local ring = string.lower(tostring((slot and slot.ring) or ""))
+    local bid = string.lower(tostring((board and board.id) or ""))
+    local sid = string.lower(tostring((slot and slot.id) or ""))
+    return ring == "outer_melee"
+      or string.find(bid, "outer", 1, true)
+      or string.find(sid, "out_m", 1, true)
+  end
+
+  local function isMeleeStackSlot(slot)
+    if type(slot) ~= "table" then
+      return false
+    end
+    local ring = string.lower(tostring(slot.ring or ""))
+    if ring == "melee" then
+      return true
+    end
+    if ring == "healer" or ring == "caster" or ring == "outer_melee" then
+      return false
+    end
+    local sid = string.lower(tostring(slot.id or ""))
+    if string.find(sid, "cthun_w", 1, true) and sid:match("_m%d+$") then
+      return true
+    end
+    local lab = string.lower(tostring(slot.label or ""))
+    return lab:match("^melee") ~= nil
+  end
+
   for _, board in ipairs(section.boards or {}) do
-    local bid = string.lower(tostring(board.id or ""))
     for _, slot in ipairs(board.slots or {}) do
       local who = slot.player_name and tostring(slot.player_name) or ""
       if who ~= "" then
         local mk = cthunSlotMark(slot, board)
-        local ring = string.lower(tostring(slot.ring or ""))
-        if not mk and (ring == "outer_melee" or string.find(bid, "outer", 1, true) or string.find(tostring(slot.id or ""), "out_m", 1, true)) then
+        if isFarSlot(slot, board) then
           table.insert(farNames, {
             name = who,
             slot = slot,
@@ -1608,12 +1635,15 @@ function UI:CollectCthunHudLines(section, full)
             myMark = "far"
           end
         elseif mk then
-          byMark[mk] = byMark[mk] or {}
-          table.insert(byMark[mk], {
-            name = who,
-            slot = slot,
-            isMe = barePlayerName(who) == me,
-          })
+          -- Full HUD lists melee stacks only; still remember your own wedge mark.
+          if isMeleeStackSlot(slot) then
+            byMark[mk] = byMark[mk] or {}
+            table.insert(byMark[mk], {
+              name = who,
+              slot = slot,
+              isMe = barePlayerName(who) == me,
+            })
+          end
           if barePlayerName(who) == me then
             myMark = mk
           end
