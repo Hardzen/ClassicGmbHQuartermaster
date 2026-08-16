@@ -1,0 +1,26 @@
+{
+  "raid": "aq40",
+  "title": "AQ40 Friday",
+  "announced": true,
+  "groups": [
+    ["Irae", "Hardzor", "Twyn", "Bexey", "Redmiso"],
+    ["Cadaverus", "Baretta", null, null, null]
+  ],
+  "bench": ["Spareone"],
+  "assignments": [
+    {
+      "section": "C'Thun",
+      "slot": "MT",
+      "player": "Hardzor",
+      "class": "Warrior",
+      "role": "Tank"
+    },
+    {
+      "section": "C'Thun",
+      "slot": "Heal 1",
+      "player": "Twyn",
+      "class": "Priest",
+      "role": "Healer"
+    }
+  ]
+}
