@@ -3544,17 +3544,20 @@ function UI:EnsureMinimapButton()
   btn:RegisterForDrag("LeftButton")
   btn:SetHighlightTexture("Interface\\Minimap\\UI-Minimap-ZoomButton-Highlight")
 
-  -- Discord bot logo (circular TGA). Inset so the tracking border frames it.
+  -- Discord bot logo (circular TGA), LibDBIcon-style centering in the ring.
   local icon = btn:CreateTexture(nil, "BACKGROUND")
   icon:SetTexture(MINIMAP_ICON_PATH)
-  icon:SetSize(21, 21)
+  icon:SetSize(20, 20)
   icon:SetPoint("CENTER", 0, 0)
+  if icon.SetTexCoord then
+    icon:SetTexCoord(0.05, 0.95, 0.05, 0.95)
+  end
   btn.icon = icon
 
   local border = btn:CreateTexture(nil, "OVERLAY")
   border:SetTexture("Interface\\Minimap\\MiniMap-TrackingBorder")
-  border:SetSize(54, 54)
-  border:SetPoint("TOPLEFT", -12, 11)
+  border:SetSize(53, 53)
+  border:SetPoint("TOPLEFT", 0, 0)
 
   btn:SetScript("OnEnter", function(selfBtn)
     GameTooltip:SetOwner(selfBtn, "ANCHOR_LEFT")
