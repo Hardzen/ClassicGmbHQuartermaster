@@ -19,8 +19,8 @@ Keep guild website / donation links **below** this block if you add them.
 3. Open with `/gmbh` or the minimap button
 4. After officers announce a sheet, sync from peers in raid/guild if your local sheet is empty
 
-### Fill HelperData without the site API (officers)
-You can generate `HelperData.lua` (raid groups + boss assignments only; wishlist stays empty) with the included Python script. Requires Python 3.
+### Fill HelperData (officers)
+You can generate `HelperData.lua` (raid groups + boss assignments) with the included Python script. Requires Python 3.
 
 Print a sample JSON file:
 
