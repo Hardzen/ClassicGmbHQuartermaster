@@ -51,6 +51,9 @@ local SLOT_MARK_FALLBACK = {
   hm_bl_t1 = "square", hm_ze_t1 = "moon", hm_th_t1 = "skull", hm_mo_t1 = "cross",
   kt_t1 = "star", kt_t2 = "circle", kt_t3 = "diamond", kt_t4 = "square",
   kt_sh_moon = "moon", kt_sh_tri = "triangle", kt_sh_cross = "cross",
+  raz_u1_mark = "skull", raz_u2_mark = "cross", raz_u3_mark = "moon", raz_u4_mark = "square",
+  thad_stalag_mark = "skull", thad_feugen_mark = "cross",
+  stun_1 = "skull", stun_2 = "cross", stun_3 = "square", stun_4 = "moon",
 }
 
 local SECTION_ID_FROM_LABEL = {
@@ -225,8 +228,16 @@ local function slotMarkKey(slot)
       return key
     end
   end
+  -- Id suffix: goth_gh_skull, cthun_w1_m1 still prefer slot.mark / fallback above.
+  for _, key in ipairs(MARK_ORDER) do
+    if sid == key or string.sub(sid, -(#key + 1)) == "_" .. key then
+      return key
+    end
+  end
   local id = tostring(slot.id or "")
-  local n = id:match("_tank_(%d+)$") or id:match("_bt_(%d+)$") or id:match("^tank_(%d+)$")
+  local n = id:match("_tank_(%d+)$") or id:match("_bt_(%d+)$")
+    or id:match("^tank_(%d+)$") or id:match("^stun_(%d+)$")
+    or id:match("^sunder_%d+_(%d+)$")
   if n then
     return MARK_ORDER[tonumber(n)]
   end
@@ -1641,8 +1652,11 @@ local function renderSection(ctx, section, raid, heading, solo)
 end
 
 GmbHLootTrackerRaidSheet = {}
+GmbHLootTrackerRaidSheet.SlotMarkKey = slotMarkKey
 
 -- HUD must use the same kill-order + skull/cross/square as the sheet table.
+-- markOverride: Bug Trio kill-order remaps the whole row. Otherwise HUD uses
+-- per-slot marks (Twins tank vs lock, Naxx crypt guards, KT tanks, …).
 function GmbHLootTrackerRaidSheet.HudBoards(section, raid)
   if type(section) ~= "table" then
     return {}
@@ -1658,20 +1672,14 @@ function GmbHLootTrackerRaidSheet.HudBoards(section, raid)
   local out = {}
   for i, board in ipairs(boards) do
     local mark = nil
+    local markOverride = false
     if marksByIdx and marksByIdx[i] then
       mark = marksByIdx[i]
+      markOverride = true
     else
       mark = boardMarkKey(board)
-      if not mark then
-        for _, s in ipairs(board.slots or {}) do
-          mark = slotMarkKey(s)
-          if mark then
-            break
-          end
-        end
-      end
     end
-    table.insert(out, { board = board, mark = mark })
+    table.insert(out, { board = board, mark = mark, markOverride = markOverride })
   end
   return out
 end

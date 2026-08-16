@@ -1728,11 +1728,39 @@ local function formatHudAssignmentLine(role, slot, me, markOverride)
   else
     nameBit = "|cff666666—|r"
   end
-  local ic = markIcon(markOverride or slot.mark)
+  local ic = markIcon(markOverride)
+  if not ic then
+    local RS = GmbHLootTrackerRaidSheet
+    if RS and RS.SlotMarkKey then
+      ic = markIcon(RS.SlotMarkKey(slot))
+    else
+      ic = markIcon(slot and slot.mark)
+    end
+  end
   if ic and who ~= "" then
     return string.format("%s: %s%s", role, ic, nameBit)
   end
   return string.format("%s: %s", role, nameBit)
+end
+
+-- Per-slot raid mark for HUD. Bug Trio kill-order can override the whole row.
+local function hudSlotMark(slot, entry)
+  entry = entry or {}
+  if entry.markOverride and entry.mark then
+    return entry.mark
+  end
+  local RS = GmbHLootTrackerRaidSheet
+  if RS and RS.SlotMarkKey then
+    local mk = RS.SlotMarkKey(slot)
+    if mk then
+      return mk
+    end
+  end
+  local raw = slot and slot.mark
+  if raw and tostring(raw) ~= "" then
+    return raw
+  end
+  return nil
 end
 
 function UI:CollectPersonalAssignments(section, raid)
@@ -1773,18 +1801,15 @@ function UI:CollectPersonalAssignments(section, raid)
     end
     for _, slot in ipairs(board.slots or {}) do
       if slot.player_name and barePlayerName(slot.player_name) == me then
-        local mark = entry.mark or slot.mark
+        local mark = hudSlotMark(slot, entry)
         -- Twins: marks live on tank/lock slots (fallback when HelperData omits slot.mark).
-        if twinsSide then
+        if twinsSide and not mark then
           local sid = string.lower(tostring(slot.id or ""))
-          local twinsMark = ({
+          mark = ({
             twin_l_t = "triangle", twin_l_lock = "diamond",
             twin_r_t = "square", twin_r_lock = "moon",
             twin_bugs_t = "circle",
           })[sid]
-          if twinsMark then
-            mark = tostring(slot.mark or "") ~= "" and slot.mark or twinsMark
-          end
         end
         local healTank = nil
         local roleLow = string.lower(tostring(slot.label or ""))
@@ -1869,8 +1894,6 @@ function UI:CollectAllBossAssignments(section, raid)
   for _, entry in ipairs(boards) do
     local board = entry.board
     local boardLab = tostring(board.label or "")
-    -- Tank mark is per-mob (Bug Trio kill-order), not the stale slot.mark fallback.
-    local boardMark = entry.mark
     for _, slot in ipairs(board.slots or {}) do
       local role = tostring(slot.label or "?")
       local prefix = shortBoardPrefix(boardLab, sectionLabel, role)
@@ -1880,13 +1903,13 @@ function UI:CollectAllBossAssignments(section, raid)
       local who = slot.player_name and tostring(slot.player_name) or ""
       local tanking = isTankingSlot(slot)
       if tanking or who ~= "" then
-        local mark = nil
-        if tanking and boardMark then
-          mark = boardMark
-        elseif not tanking then
-          mark = nil -- kicks/healers: no wrong fallback icons
+        -- Per-slot icons (Twins lock vs tank, Anub guards, KT tanks, …).
+        -- Bug Trio kill-order is the only board-wide override, and only on tanks.
+        local mark
+        if entry.markOverride and tanking then
+          mark = entry.mark
         else
-          mark = slot.mark
+          mark = hudSlotMark(slot, nil)
         end
         local line = formatHudAssignmentLine(role, slot, me, mark)
         if tanking then
@@ -2025,8 +2048,12 @@ local function refreshHudResizeHandles(frame)
   if frame.resizeRight then
     frame.resizeRight:SetWidth(edgeThick)
     frame.resizeRight:ClearAllPoints()
-    frame.resizeRight:SetPoint("TOPRIGHT", 0, -4)
+    -- Stay below the close button so the light-blue edge never covers the X.
+    frame.resizeRight:SetPoint("TOPRIGHT", 0, -24)
     frame.resizeRight:SetPoint("BOTTOMRIGHT", 0, cornerClear)
+  end
+  if frame.close then
+    frame.close:SetFrameLevel((frame:GetFrameLevel() or 0) + 20)
   end
 end
 
@@ -2269,12 +2296,14 @@ function UI:EnsureAssignHud()
 
   f.close = CreateFrame("Button", nil, f, "UIPanelCloseButton")
   f.close:SetSize(22, 22)
-  f.close:SetPoint("TOPRIGHT", 2, 2)
+  f.close:SetPoint("TOPRIGHT", -4, -2)
+  f.close:EnableMouse(true)
   f.close:SetScript("OnClick", function()
     f._userHidden = true
     saveAssignHudPosition(f)
     f:Hide()
   end)
+  f.title:SetPoint("TOPRIGHT", f.close, "TOPLEFT", -4, 0)
 
   local scroll = CreateFrame("ScrollFrame", nil, f)
   scroll:SetPoint("TOPLEFT", 10, -26)
@@ -2387,7 +2416,7 @@ function UI:EnsureAssignHud()
   -- Right edge: drag to change width only (important when HUD scale is small).
   local rightEdge = CreateFrame("Button", nil, f)
   rightEdge:SetWidth(10)
-  rightEdge:SetPoint("TOPRIGHT", 0, -4)
+  rightEdge:SetPoint("TOPRIGHT", 0, -24)
   rightEdge:SetPoint("BOTTOMRIGHT", 0, 28)
   rightEdge:SetFrameLevel((f:GetFrameLevel() or 0) + 4)
   rightEdge:EnableMouse(true)
@@ -2452,6 +2481,10 @@ function UI:EnsureAssignHud()
   end)
   f.resizeGrip = grip
   refreshHudResizeHandles(f)
+  -- Resize edge is created later and would otherwise sit on top of the X.
+  if f.close then
+    f.close:SetFrameLevel((f:GetFrameLevel() or 0) + 20)
+  end
 
   f:Hide()
   self.assignHud = f
