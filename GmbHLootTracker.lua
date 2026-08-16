@@ -2075,6 +2075,13 @@ function UI:RefreshOptionsPanel()
       self.optHudScaleLarger:Disable()
     end
   end
+  local mapShown = not charDB().minimapHidden
+  if self.optMinimapShowBtn then
+    styleTabButton(self.optMinimapShowBtn, mapShown)
+  end
+  if self.optMinimapHideBtn then
+    styleTabButton(self.optMinimapHideBtn, not mapShown)
+  end
 end
 
 local function saveAssignHudPosition(frame)
@@ -3423,6 +3430,122 @@ function UI:Toggle()
   end
 end
 
+local function minimapButtonAngle()
+  local dbc = charDB()
+  local a = tonumber(dbc.minimapAngle)
+  if not a then
+    a = -0.65 -- default lower-left of minimap
+  end
+  return a
+end
+
+local function updateMinimapButtonPosition(btn)
+  if not btn or not Minimap then
+    return
+  end
+  local angle = minimapButtonAngle()
+  local radius = ((Minimap:GetWidth() or 140) / 2) + 5
+  btn:ClearAllPoints()
+  btn:SetPoint("CENTER", Minimap, "CENTER", math.cos(angle) * radius, math.sin(angle) * radius)
+end
+
+function UI:EnsureMinimapButton()
+  if self.minimapBtn then
+    updateMinimapButtonPosition(self.minimapBtn)
+    if charDB().minimapHidden then
+      self.minimapBtn:Hide()
+    else
+      self.minimapBtn:Show()
+    end
+    return self.minimapBtn
+  end
+  if not Minimap then
+    return nil
+  end
+
+  local btn = CreateFrame("Button", "GmbHLootTrackerMinimapButton", Minimap)
+  btn:SetSize(32, 32)
+  btn:SetFrameStrata("MEDIUM")
+  btn:SetFrameLevel((Minimap:GetFrameLevel() or 0) + 8)
+  btn:SetMovable(true)
+  btn:EnableMouse(true)
+  btn:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+  btn:RegisterForDrag("LeftButton")
+  btn:SetHighlightTexture("Interface\\Minimap\\UI-Minimap-ZoomButton-Highlight")
+
+  -- Discord bot logo (circular TGA). Inset so the tracking border frames it.
+  local icon = btn:CreateTexture(nil, "BACKGROUND")
+  icon:SetTexture("Interface\\AddOns\\ClassicGmbHQuartermaster\\Textures\\minimap_icon")
+  icon:SetSize(21, 21)
+  icon:SetPoint("CENTER", 0, 0)
+  btn.icon = icon
+
+  local border = btn:CreateTexture(nil, "OVERLAY")
+  border:SetTexture("Interface\\Minimap\\MiniMap-TrackingBorder")
+  border:SetSize(54, 54)
+  border:SetPoint("TOPLEFT", -12, 11)
+
+  btn:SetScript("OnEnter", function(selfBtn)
+    GameTooltip:SetOwner(selfBtn, "ANCHOR_LEFT")
+    GameTooltip:AddLine("Classic GmbH Quartermaster", 0.95, 0.88, 0.55)
+    GameTooltip:AddLine("Left-click: open window", 0.75, 0.80, 0.88)
+    GameTooltip:AddLine("Right-click: toggle assignment HUD", 0.75, 0.80, 0.88)
+    GameTooltip:AddLine("Drag: move around minimap", 0.55, 0.62, 0.72)
+    GameTooltip:Show()
+  end)
+  btn:SetScript("OnLeave", function()
+    GameTooltip:Hide()
+  end)
+
+  btn:SetScript("OnClick", function(_, button)
+    if button == "RightButton" then
+      UI:ToggleAssignHud()
+      return
+    end
+    UI:Create()
+    UI:Toggle()
+  end)
+
+  btn:SetScript("OnDragStart", function(selfBtn)
+    selfBtn._dragging = true
+    selfBtn:LockHighlight()
+    selfBtn:SetScript("OnUpdate", function(b)
+      local mx, my = GetCursorPosition()
+      local cx, cy = Minimap:GetCenter()
+      local scale = Minimap:GetEffectiveScale() or 1
+      if not cx or not cy or scale < 0.01 then
+        return
+      end
+      mx, my = mx / scale, my / scale
+      local angle = (math.atan2 and math.atan2(my - cy, mx - cx)) or math.atan(my - cy, mx - cx)
+      charDB().minimapAngle = angle
+      updateMinimapButtonPosition(b)
+    end)
+  end)
+  btn:SetScript("OnDragStop", function(selfBtn)
+    selfBtn._dragging = nil
+    selfBtn:UnlockHighlight()
+    selfBtn:SetScript("OnUpdate", nil)
+    updateMinimapButtonPosition(selfBtn)
+  end)
+
+  self.minimapBtn = btn
+  updateMinimapButtonPosition(btn)
+  if charDB().minimapHidden then
+    btn:Hide()
+  else
+    btn:Show()
+  end
+  return btn
+end
+
+function UI:SetMinimapButtonShown(shown)
+  charDB().minimapHidden = not shown
+  self:EnsureMinimapButton()
+  self:RefreshOptionsPanel()
+  printMsg(shown and "Minimap button shown." or "Minimap button hidden. /gmbh minimap to show.")
+end
+
 function UI:Show()
   self:Create()
   self._dataDirty = false
@@ -3652,6 +3775,33 @@ function UI:Create()
   optSizeHint:SetPoint("TOPLEFT", optSmaller, "BOTTOMLEFT", 0, -14)
   optSizeHint:SetPoint("RIGHT", optionsPanel, "RIGHT", -18, 0)
   optSizeHint:SetTextColor(0.60, 0.66, 0.74)
+
+  local optMapTitle = makeLabel(optionsPanel, "Minimap button", 12)
+  optMapTitle:SetPoint("TOPLEFT", optSizeHint, "BOTTOMLEFT", 0, -22)
+  optMapTitle:SetTextColor(0.70, 0.76, 0.85)
+
+  local optMapShow = makeMainTab(optionsPanel, "Show", 70)
+  optMapShow:SetPoint("TOPLEFT", optMapTitle, "BOTTOMLEFT", 0, -12)
+  optMapShow:SetScript("OnClick", function()
+    UI:SetMinimapButtonShown(true)
+  end)
+  self.optMinimapShowBtn = optMapShow
+
+  local optMapHide = makeMainTab(optionsPanel, "Hide", 70)
+  optMapHide:SetPoint("LEFT", optMapShow, "RIGHT", 8, 0)
+  optMapHide:SetScript("OnClick", function()
+    UI:SetMinimapButtonShown(false)
+  end)
+  self.optMinimapHideBtn = optMapHide
+
+  local optMapHint = makeLabel(
+    optionsPanel,
+    "Circle button uses the Discord bot logo. Left-click opens the window; drag around the minimap.",
+    11
+  )
+  optMapHint:SetPoint("TOPLEFT", optMapShow, "BOTTOMLEFT", 0, -14)
+  optMapHint:SetPoint("RIGHT", optionsPanel, "RIGHT", -18, 0)
+  optMapHint:SetTextColor(0.60, 0.66, 0.74)
 
   -- ---- Wishlist lock (non-officers) ----
   local lockPanel = CreateFrame("Frame", nil, f, BackdropTemplateMixin and "BackdropTemplate" or nil)
@@ -3949,7 +4099,7 @@ local function cmdNeed(itemIdRaw)
 end
 
 local function usage()
-  printMsg("Commands: /gmbh | hud | hudscale <%> | target <boss> | debug | status | groups | sort | assign | wl | need")
+  printMsg("Commands: /gmbh | hud | minimap | hudscale <%> | target <boss> | debug | status | groups | sort | assign | wl | need")
 end
 
 SLASH_GMBH1 = "/gmbh"
@@ -3970,6 +4120,11 @@ SlashCmdList["GMBH"] = function(msg)
   end
   if msg == "hud" or msg == "assignhud" or msg == "myassign" then
     UI:ToggleAssignHud()
+    return
+  end
+  if msg == "minimap" or msg == "mapbtn" or msg == "mm" then
+    local hidden = charDB().minimapHidden and true or false
+    UI:SetMinimapButtonShown(hidden)
     return
   end
   if msg == "debug" then
@@ -4089,6 +4244,7 @@ boot:SetScript("OnEvent", function(_, event, arg1)
   end
   hookShiftClickItemLinks()
   UI:Create()
+  UI:EnsureMinimapButton()
   UI:RefreshAssignHud()
   -- Layout is fully ready one frame later; re-pin HUD if SV position exists.
   if C_Timer and C_Timer.After then
@@ -4098,6 +4254,7 @@ boot:SetScript("OnEvent", function(_, event, arg1)
         UI.assignHud._posApplied = true
         UI:RefreshAssignHud()
       end
+      UI:EnsureMinimapButton()
     end)
   end
   local data = db()

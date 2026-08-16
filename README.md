@@ -2,7 +2,7 @@
 
 WoW Classic Era addon for raid sheet bosses/assignments, officer wishlist, and guild peer sync.
 
-**Version:** 1.8.53
+**Version:** 1.8.54
 
 ## Install
 
