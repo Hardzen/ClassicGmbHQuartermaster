@@ -1581,6 +1581,26 @@ local function isCthunSection(section)
   return lab == "c'thun" or lab == "cthun"
 end
 
+local function isPatchwerkSection(section)
+  if type(section) ~= "table" then
+    return false
+  end
+  local id = string.lower(tostring(section.id or ""))
+  if id == "patchwerk" then
+    return true
+  end
+  local lab = string.lower(tostring(section.label or ""))
+  return lab == "patchwerk"
+end
+
+local function isPatchwerkStackSlot(slot)
+  if type(slot) ~= "table" then
+    return false
+  end
+  local sid = string.lower(tostring(slot.id or ""))
+  return sid:match("^pw_c%d+_") ~= nil
+end
+
 -- Members: only their raid target icon. Officers/RL: each mark + melee on it
 -- (same 2-per-stack as the C'Thun map). Healers/casters stay off the mark lines.
 function UI:CollectCthunHudLines(section, full)
@@ -1919,6 +1939,7 @@ function UI:CollectAllBossAssignments(section, raid)
   local tankLines = {}
   local otherLines = {}
   local sectionLabel = tostring(section.label or "")
+  local patchwerk = isPatchwerkSection(section)
 
   local RS = GmbHLootTrackerRaidSheet
   local boards = (RS and RS.HudBoards) and RS.HudBoards(section, raid) or nil
@@ -1927,6 +1948,22 @@ function UI:CollectAllBossAssignments(section, raid)
     for _, board in ipairs(section.boards or {}) do
       table.insert(boards, { board = board, mark = nil })
     end
+  end
+
+  -- Patchwerk: keep matrix order (MT + 4 heals, Soaker1 + 4, Soaker2 + 4).
+  if patchwerk then
+    local lines = {}
+    for _, entry in ipairs(boards) do
+      local board = entry.board
+      for _, slot in ipairs(board.slots or {}) do
+        if isPatchwerkStackSlot(slot) then
+          local role = tostring(slot.label or "?")
+          local mark = hudSlotMark(slot, nil)
+          table.insert(lines, formatHudAssignmentLine(role, slot, me, mark))
+        end
+      end
+    end
+    return lines
   end
 
   for _, entry in ipairs(boards) do
