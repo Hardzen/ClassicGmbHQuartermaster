@@ -1706,6 +1706,10 @@ local function isTankingSlot(slot)
   if role == "tank" or role == "offtank" or role == "ot" or role == "mt" then
     return true
   end
+  -- Explicit non-tank role wins (Patchwerk matrix: pw_c2_mt… are healers, ids end in _mt).
+  if role ~= "" then
+    return false
+  end
   local lab = string.lower(tostring(slot.label or ""))
   if lab == "" then
     return false
@@ -1719,11 +1723,26 @@ local function isTankingSlot(slot)
   if string.find(lab, "tank", 1, true) and not string.find(lab, "heal", 1, true) then
     return true
   end
+  -- Soaker seats without role (legacy payloads).
+  if lab == "soaker 1" or lab == "soaker 2" or lab:match("^soaker%s*%d+$") then
+    return true
+  end
   local sid = string.lower(tostring(slot.id or ""))
+  -- Patchwerk: only C1 on each row is the tank (pw_c1_mt / pw_c1_s1 / pw_c1_s2).
+  if sid:match("^pw_c1_") then
+    return true
+  end
+  if sid:match("^pw_c%d+_") then
+    return false
+  end
   if string.find(sid, "_t$", 1, false) or string.find(sid, "_lock", 1, true) or string.find(sid, "_bt", 1, true) then
     return true
   end
-  if string.find(sid, "_mt", 1, true) or string.find(sid, "_ot", 1, true) then
+  -- Exact role suffixes only — do not match pw_c2_mt (healer on MT row).
+  if sid:match("_mt$") and not sid:match("^pw_") then
+    return true
+  end
+  if sid:match("_ot$") then
     return true
   end
   return false
@@ -1862,18 +1881,7 @@ function UI:CollectPersonalAssignments(section, raid)
           else
             -- Boss row (Skeram Left / Twins side / etc.): find the Tank seat on this board.
             for _, s in ipairs(board.slots or {}) do
-              local lab = string.lower(tostring(s.label or ""))
-              local sid = string.lower(tostring(s.id or ""))
-              local isPrimaryTank = (lab == "tank" or lab == "mt" or lab == "main tank")
-                or (
-                  string.find(lab, "tank", 1, true)
-                  and not string.find(lab, "backup", 1, true)
-                  and not string.find(lab, "lock", 1, true)
-                  and not string.find(lab, "heal", 1, true)
-                )
-                or sid:match("_t$") ~= nil
-                or sid:match("_mt$") ~= nil
-              if isPrimaryTank and s.player_name and tostring(s.player_name) ~= "" then
+              if isTankingSlot(s) and s.player_name and tostring(s.player_name) ~= "" then
                 healTank = tostring(s.player_name)
                 break
               end
