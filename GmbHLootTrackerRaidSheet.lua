@@ -1406,48 +1406,105 @@ end
 --------------------------------------------------------------------
 
 -- Coords from aq40_schema — percent of C'Thun map image.
-local CTHUN_SLOT_POS = {
-  ["cthun_w1_m1"] = { 42.92, 31.06, "skull", "melee" },
-  ["cthun_w1_m2"] = { 42.92, 34.76, "skull", "melee" },
-  ["cthun_w1_heal"] = { 37.75, 20.44, "skull", "healer" },
-  ["cthun_w1_caster"] = { 33.35, 9.81, "skull", "caster" },
-  ["cthun_w2_m1"] = { 57.08, 31.06, "cross", "melee" },
-  ["cthun_w2_m2"] = { 57.08, 34.76, "cross", "melee" },
-  ["cthun_w2_heal"] = { 62.25, 20.44, "cross", "healer" },
-  ["cthun_w2_caster"] = { 67.03, 8.89, "cross", "caster" },
-  ["cthun_w3_m1"] = { 67.09, 41.07, "square", "melee" },
-  ["cthun_w3_m2"] = { 67.09, 44.77, "square", "melee" },
-  ["cthun_w3_heal"] = { 79.56, 37.75, "square", "healer" },
-  ["cthun_w3_caster"] = { 90.19, 33.35, "square", "caster" },
-  ["cthun_w4_m1"] = { 67.09, 55.23, "moon", "melee" },
-  ["cthun_w4_m2"] = { 67.09, 58.93, "moon", "melee" },
-  ["cthun_w4_heal"] = { 79.56, 62.25, "moon", "healer" },
-  ["cthun_w4_caster"] = { 91.11, 67.03, "moon", "caster" },
-  ["cthun_w5_m1"] = { 57.08, 65.24, "triangle", "melee" },
-  ["cthun_w5_m2"] = { 57.08, 68.94, "triangle", "melee" },
-  ["cthun_w5_heal"] = { 62.25, 79.56, "triangle", "healer" },
-  ["cthun_w5_caster"] = { 66.65, 90.19, "triangle", "caster" },
-  ["cthun_w6_m1"] = { 42.92, 65.24, "diamond", "melee" },
-  ["cthun_w6_m2"] = { 42.92, 68.94, "diamond", "melee" },
-  ["cthun_w6_heal"] = { 37.75, 79.56, "diamond", "healer" },
-  ["cthun_w6_caster"] = { 32.97, 91.11, "diamond", "caster" },
-  ["cthun_w7_m1"] = { 32.91, 55.23, "circle", "melee" },
-  ["cthun_w7_m2"] = { 32.91, 58.93, "circle", "melee" },
-  ["cthun_w7_heal"] = { 20.44, 62.25, "circle", "healer" },
-  ["cthun_w7_caster"] = { 9.81, 66.65, "circle", "caster" },
-  ["cthun_w8_m1"] = { 32.91, 41.07, "star", "melee" },
-  ["cthun_w8_m2"] = { 32.91, 44.77, "star", "melee" },
-  ["cthun_w8_heal"] = { 20.44, 37.75, "star", "healer" },
-  ["cthun_w8_caster"] = { 8.89, 32.97, "star", "caster" },
-  ["cthun_out_m1"] = { 50.00, 1.50, "", "outer_melee" },
-  ["cthun_out_m2"] = { 84.29, 15.71, "", "outer_melee" },
-  ["cthun_out_m3"] = { 98.50, 50.00, "", "outer_melee" },
-  ["cthun_out_m4"] = { 84.29, 84.29, "", "outer_melee" },
-  ["cthun_out_m5"] = { 50.00, 98.50, "", "outer_melee" },
-  ["cthun_out_m6"] = { 15.71, 84.29, "", "outer_melee" },
-  ["cthun_out_m7"] = { 1.50, 50.00, "", "outer_melee" },
-  ["cthun_out_m8"] = { 15.71, 15.71, "", "outer_melee" },
+local MARK_ORDER = { "skull", "cross", "square", "moon", "triangle", "diamond", "circle" }
+local GROUP_ROLES = { "melee1", "melee2", "healer", "caster" }
+
+-- Distances from center (50, 50) for each role
+local ROLE_DISTANCES = {
+    melee1 = 20.24,
+    melee2 = 16.82,
+    healer = 32.00,
+    caster = 43.46,
 }
+
+-- Direction angles (in degrees) for each raid mark spoke
+local MARK_ANGLES = {
+    skull    = -110.5,
+    cross    = -69.5,
+    square   = -20.5,
+    moon     = 20.5,
+    triangle = 69.5,
+    diamond  = 110.5,
+    circle   = 159.5,
+}
+
+GROUP_POSITIONS = {}
+
+for _, mark in ipairs(MARK_ORDER) do
+    GROUP_POSITIONS[mark] = {}
+    local rad = math.rad(MARK_ANGLES[mark])
+    local cosA, sinA = math.cos(rad), math.sin(rad)
+
+    for _, role in ipairs(GROUP_ROLES) do
+        local dist = ROLE_DISTANCES[role]
+        
+        -- Compute (x, y) relative to center (50, 50)
+        GROUP_POSITIONS[mark][role] = {
+            x = math.floor((50 + dist * cosA) * 100 + 0.5) / 100,
+            y = math.floor((50 + dist * sinA) * 100 + 0.5) / 100
+        }
+    end
+end
+
+-- Distances from center (50, 50) for each slot tier
+local ROLE_DISTANCES = {
+    m1     = 20.24,
+    m2     = 16.82,
+    heal   = 32.00,
+    caster = 43.46,
+}
+
+-- Mappings for mark names and polar angles in degrees
+local WEDGE_CONFIG = {
+    w1 = { mark = "skull",    angle = -110.5 },
+    w2 = { mark = "cross",   angle = -69.5  },
+    w3 = { mark = "square",  angle = -20.5  },
+    w4 = { mark = "moon",    angle = 20.5   },
+    w5 = { mark = "triangle",angle = 69.5   },
+    w6 = { mark = "diamond", angle = 110.5  },
+    w7 = { mark = "circle",  angle = 159.5  },
+    w8 = { mark = "star",    angle = -159.5 },
+}
+
+-- Map slot suffix to internal position metadata
+local ROLE_TYPES = {
+    m1     = "melee",
+    m2     = "melee",
+    heal   = "healer",
+    caster = "caster",
+}
+
+local CTHUN_SLOT_POS = {}
+
+-- 1. Programmatically generate C'Thun inner wedge positions
+for wKey, config in pairs(WEDGE_CONFIG) do
+    local rad = math.rad(config.angle)
+    local cosA, sinA = math.cos(rad), math.sin(rad)
+
+    for rKey, dist in pairs(ROLE_DISTANCES) do
+        local slotId = string.format("cthun_%s_%s", wKey, rKey)
+        local x = math.floor((50 + dist * cosA) * 100 + 0.5) / 100
+        local y = math.floor((50 + dist * sinA) * 100 + 0.5) / 100
+
+        CTHUN_SLOT_POS[slotId] = { x, y, config.mark, ROLE_TYPES[rKey] }
+    end
+end
+
+-- 2. Add fixed outer melee positions
+local OUTER_MELEE = {
+    ["cthun_out_m1"] = { 50.00, 1.50 },
+    ["cthun_out_m2"] = { 84.29, 15.71 },
+    ["cthun_out_m3"] = { 98.50, 50.00 },
+    ["cthun_out_m4"] = { 84.29, 84.29 },
+    ["cthun_out_m5"] = { 50.00, 98.50 },
+    ["cthun_out_m6"] = { 15.71, 84.29 },
+    ["cthun_out_m7"] = { 1.50, 50.00 },
+    ["cthun_out_m8"] = { 15.71, 15.71 },
+}
+
+for slotId, coords in pairs(OUTER_MELEE) do
+    CTHUN_SLOT_POS[slotId] = { coords[1], coords[2], "", "outer_melee" }
+end
 
 local function cthunShortName(name)
   local n = tostring(name or "")
