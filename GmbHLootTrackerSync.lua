@@ -1,11 +1,13 @@
 --[[ Guild peer sync.
 
 GMBHWL — wishlist only, whispered to online Officer / Headmaster ranks.
-GMBHRS — raid sheets, whispered to online guild members (all ranks).
+GMBHRS — raid assignment sheets (one AceComm stream; do not multiplex).
+GMBHGP — groups+bench only (separate prefix so it cannot smash the GMBHRS spool).
 ]]
 
 local PREFIX_WL = "GMBHWL"
 local PREFIX_RAID = "GMBHRS"
+local PREFIX_GROUPS = "GMBHGP"
 local PRESENCE_PREFIX = "GMBHPR"
 local SHARE_COOLDOWN = 20
 local APPLY_LINES_PER_FRAME = 4
@@ -833,6 +835,8 @@ local function aceSharePayload(kind, rev, synced, lines, toPlayer, quiet, opts)
     return false
   end
   local payload = string.format("%s|%s|%s\n%s", cmd, tostring(rev or ""), tostring(synced or ""), wire)
+  local prefix = opts.prefix
+    or ((kind == "raid") and PREFIX_RAID or PREFIX_WL)
   if not opts.skipBusy then
     shareBusy[kind] = true
     shareQuiet[kind] = quiet and true or false
@@ -875,7 +879,6 @@ local function aceSharePayload(kind, rev, synced, lines, toPlayer, quiet, opts)
 
   local deflateBit = (cmd == "SYNCZ" or cmd == "SYNCZG") and "+Deflate" or ""
   local what = groups and "groups+bench" or kindLabel(kind)
-  local prefix = (kind == "raid") and PREFIX_RAID or PREFIX_WL
   if toPlayer and tostring(toPlayer) ~= "" then
     if not opts.skipBusy then
       shareTargets[kind] = { toPlayer }
@@ -1252,6 +1255,9 @@ local function encodeGroupLines(raids)
       escField(raid.bug_trio_last),
     }, "|"))
     for gi, group in ipairs(raid.groups or {}) do
+      if gi > 8 then
+        break
+      end
       if type(group) == "table" then
         for si = 1, 5 do
           local seat = group[si]
@@ -1987,7 +1993,11 @@ function Sync.ShareRaid(toPlayer, opts)
   local dest = targeted and toPlayer or nil
   -- Groups+bench first: tiny AceComm message (often one packet). Does not use shareBusy.
   if #groupLines > 0 then
-    aceSharePayload("raid", rev, synced, groupLines, dest, quiet, { tag = "groups", skipBusy = true })
+    aceSharePayload("raid", rev, synced, groupLines, dest, quiet, {
+      tag = "groups",
+      skipBusy = true,
+      prefix = PREFIX_GROUPS,
+    })
   end
   if #lines == 0 then
     return true
@@ -2308,7 +2318,7 @@ local function skipRaidHeader(line)
   return line == "" or line == "#RAID" or line == "#WL" or line == "#GRPS"
 end
 
--- Groups+bench only: ~40–80 short lines. Cheap enough for a higher per-frame budget.
+-- Groups+bench: tiny text. Parse immediately (no OnUpdate stream, no GMBHRS spool).
 local function applyGroupsAsync(revision, syncedAt, blob, fromPlayer)
   setSyncStatus("applying groups+bench…", { quiet = true })
   blob = blob or ""
@@ -2317,38 +2327,24 @@ local function applyGroupsAsync(revision, syncedAt, blob, fromPlayer)
     blob = string.sub(blob, grpStart + 6)
   end
   local raids, feedLine = newRaidDecoder()
-  local pos, len = 1, #blob
-  local f = CreateFrame("Frame")
-  f:SetScript("OnUpdate", function(self)
-    local budget = 25
-    while budget > 0 and pos <= len do
-      local nl = string.find(blob, "\n", pos, true)
-      local line
-      if nl then
-        line = string.sub(blob, pos, nl - 1)
-        pos = nl + 1
-      else
-        line = string.sub(blob, pos)
-        pos = len + 1
-      end
-      if not skipRaidHeader(line) then
-        local ok, err = pcall(feedLine, line)
-        if not ok then
-          self:SetScript("OnUpdate", nil)
-          requestRetry("raid", fromPlayer, "Group sync apply failed — retrying… (" .. tostring(err) .. ")")
-          return
-        end
-      end
-      budget = budget - 1
+  local n = 0
+  for line in string.gmatch(blob .. "\n", "([^\n]*)\n") do
+    n = n + 1
+    if n > 200 then
+      break
     end
-    if pos > len then
-      self:SetScript("OnUpdate", nil)
-      local ok, err = pcall(finishApplyGroups, revision, syncedAt, raids, fromPlayer)
+    if not skipRaidHeader(line) then
+      local ok = pcall(feedLine, line)
       if not ok then
-        requestRetry("raid", fromPlayer, "Group sync apply failed — retrying… (" .. tostring(err) .. ")")
+        requestRetry("raid", fromPlayer, "Group sync apply failed — retrying…")
+        return
       end
     end
-  end)
+  end
+  local ok, err = pcall(finishApplyGroups, revision, syncedAt, raids, fromPlayer)
+  if not ok then
+    requestRetry("raid", fromPlayer, "Group sync apply failed — retrying… (" .. tostring(err) .. ")")
+  end
 end
 
 -- Decode raid lines from a single blob across frames (AceComm path).
@@ -2603,10 +2599,13 @@ function Sync.Register()
         onKindAddonMessage("wl", message, distribution, sender)
       elseif prefix == PREFIX_RAID then
         onKindAddonMessage("raid", message, distribution, sender)
+      elseif prefix == PREFIX_GROUPS then
+        onKindAddonMessage("raid", message, distribution, sender)
       end
     end
     Comm:RegisterComm(PREFIX_WL, onComm)
     Comm:RegisterComm(PREFIX_RAID, onComm)
+    Comm:RegisterComm(PREFIX_GROUPS, onComm)
   end
   if C_ChatInfo and C_ChatInfo.RegisterAddonMessagePrefix then
     C_ChatInfo.RegisterAddonMessagePrefix(PRESENCE_PREFIX)
