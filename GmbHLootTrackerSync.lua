@@ -235,6 +235,95 @@ local function raidsHaveSheet(raids)
   return false
 end
 
+local function raidHasAssignments(raids)
+  if type(raids) ~= "table" then
+    return false
+  end
+  for _, raid in pairs(raids) do
+    if type(raid) == "table" then
+      if type(raid.sections) == "table" and #(raid.sections) > 0 then
+        return true
+      end
+      if type(raid.assignments) == "table" and #(raid.assignments) > 0 then
+        return true
+      end
+    end
+  end
+  return false
+end
+
+-- Groups payload must not wipe boss slots; assignment payload must not wipe G1–G8.
+local function patchGroupsInto(data, incoming)
+  if type(data) ~= "table" then
+    return
+  end
+  data.raids = data.raids or {}
+  for slug, src in pairs(incoming or {}) do
+    if type(src) == "table" and slug and slug ~= "" then
+      local dest = data.raids[slug]
+      if type(dest) ~= "table" then
+        dest = {
+          raid_slug = slug,
+          groups = {},
+          bench = {},
+          assignments = {},
+          sections = {},
+          has_sheet = src.has_sheet and true or false,
+          announced = src.announced and true or false,
+        }
+        data.raids[slug] = dest
+      end
+      dest.groups = src.groups or dest.groups
+      dest.bench = src.bench or dest.bench
+      if src.announced ~= nil then
+        dest.announced = src.announced
+      end
+      if src.has_sheet then
+        dest.has_sheet = true
+      end
+      if src.title then
+        dest.title = src.title
+      end
+    end
+  end
+end
+
+local function patchAssignmentsInto(data, incoming)
+  if type(data) ~= "table" then
+    return
+  end
+  data.raids = data.raids or {}
+  for slug, src in pairs(incoming or {}) do
+    if type(src) == "table" and slug and slug ~= "" then
+      local dest = data.raids[slug]
+      if type(dest) ~= "table" then
+        dest = {
+          raid_slug = slug,
+          groups = {},
+          bench = {},
+          assignments = {},
+          sections = {},
+        }
+        data.raids[slug] = dest
+      end
+      if src.title then dest.title = src.title end
+      if src.event_start_at then dest.event_start_at = src.event_start_at end
+      if src.version then dest.version = src.version end
+      if src.updated_at then dest.updated_at = src.updated_at end
+      if src.announced ~= nil then dest.announced = src.announced end
+      if src.has_sheet then dest.has_sheet = true end
+      if src.member_locked ~= nil then dest.member_locked = src.member_locked end
+      if src.bug_trio_last then dest.bug_trio_last = src.bug_trio_last end
+      if type(src.sections) == "table" and #(src.sections) > 0 then
+        dest.sections = src.sections
+      end
+      if type(src.assignments) == "table" and #(src.assignments) > 0 then
+        dest.assignments = src.assignments
+      end
+    end
+  end
+end
+
 -- HelperData is preferred for UI, but peer sync writes GmbHLootTrackerDB.
 -- Officers often have a raid-only HelperData.lua — overlay peer wishlist/raids from SV.
 local function overlayPeerFromSV(h, s)
@@ -270,15 +359,19 @@ local function overlayPeerFromSV(h, s)
       end
     end
   end
-  if raidsHaveSheet(s.raids) then
-    local helperHasRaid = raidsHaveSheet(h.raids)
-    local sRaidAt = s.raidSyncedAt or s.syncedAt or ""
-    local hRaidAt = h.raidSyncedAt or h.syncedAt or ""
-    if (not helperHasRaid) or stampNewer(sRaidAt, hRaidAt) then
-      h.raids = s.raids
-      h.raidSyncedAt = s.raidSyncedAt or sRaidAt
-      if s.raidRevision then
-        h.raidRevision = s.raidRevision
+  if type(s.raids) == "table" then
+    -- Merge; never replace the whole table (groups-only SV would wipe helper slots).
+    patchGroupsInto(h, s.raids)
+    if raidHasAssignments(s.raids) then
+      local helperHasAssign = raidHasAssignments(h.raids)
+      local sRaidAt = s.raidSyncedAt or s.syncedAt or ""
+      local hRaidAt = h.raidSyncedAt or h.syncedAt or ""
+      if (not helperHasAssign) or stampNewer(sRaidAt, hRaidAt) then
+        patchAssignmentsInto(h, s.raids)
+        h.raidSyncedAt = s.raidSyncedAt or sRaidAt
+        if s.raidRevision then
+          h.raidRevision = s.raidRevision
+        end
       end
     end
   end
@@ -2035,9 +2128,18 @@ local function finishApply(kind, revision, syncedAt, raids, byItem, items, fromP
     if not hasRaids then
       return
     end
+    local incomingAssign = raidHasAssignments(raids)
+    local localAssign = raidHasAssignments((db() or {}).raids)
+    -- Groups share uses the same stamp as assignments. Do not skip a sheet
+    -- that actually has sections just because groups already applied.
     if Sync.HasRaidData() and not syncedAtNewer(syncedAt, Sync.LocalRaidSyncedAt()) then
-      if raidsAreMemberLocked(raids) or not localRaidsAreLocked() then
+      if not incomingAssign then
         return
+      end
+      if localAssign then
+        if raidsAreMemberLocked(raids) or not localRaidsAreLocked() then
+          return
+        end
       end
     end
     if raidsAreMemberLocked(raids) and Sync.HasRaidData() and not localRaidsAreLocked() then
@@ -2052,8 +2154,8 @@ local function finishApply(kind, revision, syncedAt, raids, byItem, items, fromP
       return
     end
     if hasRaids then
-      -- Names already fixed during decode; skip full-tree SanitizeTree (freezes Classic).
-      data.raids = raids
+      -- Merge slots into existing raids so groups+bench from GMBHGP survive.
+      patchAssignmentsInto(data, raids)
       data.raidSyncedAt = syncedAt
       data.raidRevision = revision
     end
@@ -2111,41 +2213,6 @@ local function finishApply(kind, revision, syncedAt, raids, byItem, items, fromP
   end)
 end
 
-local function patchGroupsInto(data, incoming)
-  if type(data) ~= "table" then
-    return
-  end
-  data.raids = data.raids or {}
-  for slug, src in pairs(incoming or {}) do
-    if type(src) == "table" and slug and slug ~= "" then
-      local dest = data.raids[slug]
-      if type(dest) ~= "table" then
-        dest = {
-          raid_slug = slug,
-          groups = {},
-          bench = {},
-          assignments = {},
-          sections = {},
-          has_sheet = src.has_sheet and true or false,
-          announced = src.announced and true or false,
-        }
-        data.raids[slug] = dest
-      end
-      dest.groups = src.groups or dest.groups
-      dest.bench = src.bench or dest.bench
-      if src.announced ~= nil then
-        dest.announced = src.announced
-      end
-      if src.has_sheet then
-        dest.has_sheet = true
-      end
-      if src.title then
-        dest.title = src.title
-      end
-    end
-  end
-end
-
 local function finishApplyGroups(revision, syncedAt, raids, fromPlayer)
   local any = false
   for _ in pairs(raids or {}) do
@@ -2161,12 +2228,8 @@ local function finishApplyGroups(revision, syncedAt, raids, fromPlayer)
   end
   local data = beginPeerDB()
   if type(data) == "table" then
-    if syncedAt and tostring(syncedAt) ~= "" then
-      data.raidSyncedAt = syncedAt
-    end
-    if revision and tostring(revision) ~= "" then
-      data.raidRevision = revision
-    end
+    -- Do not set raidSyncedAt here — that stamp belongs to the assignment blob.
+    -- Stamping it on groups made finishApply treat the sheet as already current.
     data.syncSource = "guild"
     data.syncFrom = fromPlayer
   end
