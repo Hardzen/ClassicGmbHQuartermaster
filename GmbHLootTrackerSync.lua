@@ -449,7 +449,7 @@ local function maybeWarnNewerVersion(fromName, fromVer)
   notifyPresenceUi()
 end
 
-function Sync.MarkPeer(name, version)
+function Sync.MarkPeer(name, version, opts)
   if not name or tostring(name) == "" then
     return
   end
@@ -464,7 +464,9 @@ function Sync.MarkPeer(name, version)
   if version and tostring(version) ~= "" then
     maybeWarnNewerVersion(name, version)
   end
-  notifyPresenceUi()
+  if not (opts and opts.quiet) then
+    notifyPresenceUi()
+  end
 end
 
 function Sync.HasAddon(name)
@@ -802,7 +804,9 @@ local function aceSend(kind, payload, distribution, target, prio)
 end
 
 -- AceComm bulk share (Gargul-style): LibDeflate + AceComm BULK. No BEGIN/CHUNK/END.
-local function aceSharePayload(kind, rev, synced, lines, toPlayer, quiet)
+-- opts.tag = "groups" → SYNCZG (tiny G1–G8+bench). opts.skipBusy = true for that send.
+local function aceSharePayload(kind, rev, synced, lines, toPlayer, quiet, opts)
+  opts = opts or {}
   local Comm = GmbHLootTrackerComm
   if not Comm or not Comm.SendCommMessage then
     return false
@@ -812,24 +816,27 @@ local function aceSharePayload(kind, rev, synced, lines, toPlayer, quiet)
   end
   local blob = table.concat(lines, "\n")
   local wire = blob
-  local cmd = "SYNC"
+  local groups = opts.tag == "groups"
+  local cmd = groups and "SYNCG" or "SYNC"
   if Comm.CanCompress and Comm.CanCompress() and Comm.Compress then
     local compressed = Comm.Compress(blob)
     if compressed then
       wire = compressed
-      cmd = "SYNCZ"
+      cmd = groups and "SYNCZG" or "SYNCZ"
     end
   end
   -- Raid must go compressed when LibDeflate is loaded (avoid fat plaintext AceComm).
-  if kind == "raid" and cmd ~= "SYNCZ" then
+  if kind == "raid" and cmd ~= "SYNCZ" and cmd ~= "SYNCZG" then
     if not quiet then
       printMsg("Raid share needs LibDeflate (AceComm+Deflate). /reload after updating the addon.")
     end
     return false
   end
   local payload = string.format("%s|%s|%s\n%s", cmd, tostring(rev or ""), tostring(synced or ""), wire)
-  shareBusy[kind] = true
-  shareQuiet[kind] = quiet and true or false
+  if not opts.skipBusy then
+    shareBusy[kind] = true
+    shareQuiet[kind] = quiet and true or false
+  end
 
   local finished = false
   local function done()
@@ -837,12 +844,17 @@ local function aceSharePayload(kind, rev, synced, lines, toPlayer, quiet)
       return
     end
     finished = true
-    shareBusy[kind] = false
-    shareTargets[kind] = nil
+    if not opts.skipBusy then
+      shareBusy[kind] = false
+      shareTargets[kind] = nil
+      shareQuiet[kind] = false
+    end
+    local deflate = (cmd == "SYNCZ" or cmd == "SYNCZG")
+    local what = groups and "groups+bench" or kindLabel(kind)
     local msg = string.format(
       "Shared %s via AceComm%s (rev %s, %d→%d bytes).",
-      kindLabel(kind),
-      cmd == "SYNCZ" and "+Deflate" or "",
+      what,
+      deflate and "+Deflate" or "",
       string.sub(tostring(rev or ""), 1, 8),
       #blob,
       #wire
@@ -850,8 +862,9 @@ local function aceSharePayload(kind, rev, synced, lines, toPlayer, quiet)
     if not quiet then
       printMsg(msg)
     end
-    setSyncStatus(msg)
-    shareQuiet[kind] = false
+    if not opts.skipBusy then
+      setSyncStatus(msg)
+    end
   end
 
   local function onSent(_, sent, total)
@@ -860,40 +873,44 @@ local function aceSharePayload(kind, rev, synced, lines, toPlayer, quiet)
     end
   end
 
+  local deflateBit = (cmd == "SYNCZ" or cmd == "SYNCZG") and "+Deflate" or ""
+  local what = groups and "groups+bench" or kindLabel(kind)
   local prefix = (kind == "raid") and PREFIX_RAID or PREFIX_WL
   if toPlayer and tostring(toPlayer) ~= "" then
-    shareTargets[kind] = { toPlayer }
-    setSyncStatus(string.format("sharing %s with %s…", kindLabel(kind), tostring(toPlayer)))
+    if not opts.skipBusy then
+      shareTargets[kind] = { toPlayer }
+    end
     if not quiet then
       printMsg(string.format(
         "Sharing %s with %s via AceComm%s (%d lines, %d bytes)…",
-        kindLabel(kind),
+        what,
         tostring(toPlayer),
-        cmd == "SYNCZ" and "+Deflate" or "",
+        deflateBit,
         #lines,
         #wire
       ))
     end
     Comm:SendCommMessage(prefix, payload, "WHISPER", toPlayer, "BULK", onSent)
-    after(math.max(30, (#payload / 200) * 0.1 + 10), done)
+    after(math.max(8, (#payload / 200) * 0.1 + 4), done)
     return true
   end
 
-  local dist = preferredDist(kind)
-  shareTargets[kind] = nil
-  setSyncStatus(string.format("sharing %s on %s…", kindLabel(kind), dist))
+  if not opts.skipBusy then
+    shareTargets[kind] = nil
+    setSyncStatus(string.format("sharing %s on %s…", what, preferredDist(kind)))
+  end
   if not quiet then
     printMsg(string.format(
       "Sharing %s on %s via AceComm%s (%d lines, %d bytes)…",
-      kindLabel(kind),
-      dist,
-      cmd == "SYNCZ" and "+Deflate" or "",
+      what,
+      preferredDist(kind),
+      deflateBit,
       #lines,
       #wire
     ))
   end
-  Comm:SendCommMessage(prefix, payload, dist, nil, "BULK", onSent)
-  after(math.max(30, (#payload / 200) * 0.1 + 10), done)
+  Comm:SendCommMessage(prefix, payload, preferredDist(kind), nil, "BULK", onSent)
+  after(math.max(8, (#payload / 200) * 0.1 + 4), done)
   return true
 end
 
@@ -1132,48 +1149,8 @@ local function encodeRaidLines(raids)
       raid.member_locked and "1" or "0",
       escField(raid.bug_trio_last),
     }, "|"))
-    for gi, group in ipairs(raid.groups or {}) do
-      if type(group) == "table" then
-        for si = 1, 5 do
-          local seat = group[si]
-          if type(seat) == "table" then
-            local seatName = seat.name or seat.player_name
-            if seatName and tostring(seatName) ~= "" then
-              table.insert(lines, table.concat({
-                "RGRP",
-                escField(slug),
-                tostring(gi),
-                tostring(si),
-                escField(seatName),
-                escField(seat.class),
-                escField(seat.class_color),
-                escField(seat.role),
-              }, "|"))
-            end
-          end
-        end
-      end
-    end
-    local benchCount = 0
-    for _, seat in ipairs(raid.bench or {}) do
-      if benchCount >= 80 then
-        break
-      end
-      if type(seat) == "table" then
-        local seatName = seat.name or seat.player_name
-        if seatName and tostring(seatName) ~= "" then
-          benchCount = benchCount + 1
-          table.insert(lines, table.concat({
-            "RBENCH",
-            escField(slug),
-            escField(seatName),
-            escField(seat.class),
-            escField(seat.class_color),
-            escField(seat.role),
-          }, "|"))
-        end
-      end
-    end
+    -- Groups/bench go in a separate tiny AceComm payload (encodeGroupLines).
+    -- Bundling them into the assignment blob made Classic hang on AceComm concat/Deflate.
     for secIdx, section in ipairs(raid.sections or {}) do
       if type(section) == "table" then
         table.insert(lines, table.concat({
@@ -1238,6 +1215,80 @@ local function encodeRaidLines(raids)
             escField(a.class),
             escField(a.class_color),
             escField(a.role),
+          }, "|"))
+        end
+      end
+    end
+  end
+  return lines
+end
+
+-- Tiny Groups+Bench wire (RMETA + filled seats only). Separate from boss slots
+-- so AceComm never concatenates the full sheet just to show G1–G8.
+local function encodeGroupLines(raids)
+  local lines = {}
+  if type(raids) ~= "table" then
+    return lines
+  end
+  local slugs = {}
+  for slug, raid in pairs(raids) do
+    if type(raid) == "table" and raid.has_sheet and raid.announced then
+      table.insert(slugs, tostring(slug))
+    end
+  end
+  table.sort(slugs)
+  for _, slug in ipairs(slugs) do
+    local raid = raids[slug]
+    table.insert(lines, table.concat({
+      "RMETA",
+      escField(slug),
+      escField(raid.title),
+      escField(raid.event_start_at),
+      escField(raid.version),
+      escField(raid.updated_at),
+      raid.announced and "1" or "0",
+      raid.has_sheet and "1" or "0",
+      raid.member_locked and "1" or "0",
+      escField(raid.bug_trio_last),
+    }, "|"))
+    for gi, group in ipairs(raid.groups or {}) do
+      if type(group) == "table" then
+        for si = 1, 5 do
+          local seat = group[si]
+          if type(seat) == "table" then
+            local seatName = seat.name or seat.player_name
+            if seatName and tostring(seatName) ~= "" then
+              table.insert(lines, table.concat({
+                "RGRP",
+                escField(slug),
+                tostring(gi),
+                tostring(si),
+                escField(seatName),
+                escField(seat.class),
+                escField(seat.class_color),
+                escField(seat.role),
+              }, "|"))
+            end
+          end
+        end
+      end
+    end
+    local benchCount = 0
+    for _, seat in ipairs(raid.bench or {}) do
+      if benchCount >= 80 then
+        break
+      end
+      if type(seat) == "table" then
+        local seatName = seat.name or seat.player_name
+        if seatName and tostring(seatName) ~= "" then
+          benchCount = benchCount + 1
+          table.insert(lines, table.concat({
+            "RBENCH",
+            escField(slug),
+            escField(seatName),
+            escField(seat.class),
+            escField(seat.class_color),
+            escField(seat.role),
           }, "|"))
         end
       end
@@ -1472,6 +1523,18 @@ local function buildRaidLines(data)
     end
   end
   return lines, #raidLines
+end
+
+local function buildGroupLines(data)
+  local lines = {}
+  local groupLines = encodeGroupLines(data and data.raids)
+  if #groupLines > 0 then
+    table.insert(lines, "#GRPS")
+    for _, line in ipairs(groupLines) do
+      table.insert(lines, line)
+    end
+  end
+  return lines, #groupLines
 end
 
 function Sync.HasWishlistData()
@@ -1895,8 +1958,9 @@ function Sync.ShareRaid(toPlayer, opts)
   if type(data) ~= "table" then
     return false
   end
-  local lines, raidCount = buildRaidLines(data)
-  if #lines == 0 then
+  local groupLines = buildGroupLines(data)
+  local lines = buildRaidLines(data)
+  if #groupLines == 0 and #lines == 0 then
     if not quiet then
       printMsg("Nothing to share — raid sheet is not announced yet.")
     end
@@ -1920,7 +1984,15 @@ function Sync.ShareRaid(toPlayer, opts)
     end
     return false
   end
-  return aceSharePayload("raid", rev, synced, lines, targeted and toPlayer or nil, quiet)
+  local dest = targeted and toPlayer or nil
+  -- Groups+bench first: tiny AceComm message (often one packet). Does not use shareBusy.
+  if #groupLines > 0 then
+    aceSharePayload("raid", rev, synced, groupLines, dest, quiet, { tag = "groups", skipBusy = true })
+  end
+  if #lines == 0 then
+    return true
+  end
+  return aceSharePayload("raid", rev, synced, lines, dest, quiet)
 end
 
 local requestRetry -- forward decl (used by apply paths)
@@ -2027,6 +2099,71 @@ local function finishApply(kind, revision, syncedAt, raids, byItem, items, fromP
       Sync.Announce()
     end
   end)
+end
+
+local function patchGroupsInto(data, incoming)
+  if type(data) ~= "table" then
+    return
+  end
+  data.raids = data.raids or {}
+  for slug, src in pairs(incoming or {}) do
+    if type(src) == "table" and slug and slug ~= "" then
+      local dest = data.raids[slug]
+      if type(dest) ~= "table" then
+        dest = {
+          raid_slug = slug,
+          groups = {},
+          bench = {},
+          assignments = {},
+          sections = {},
+          has_sheet = src.has_sheet and true or false,
+          announced = src.announced and true or false,
+        }
+        data.raids[slug] = dest
+      end
+      dest.groups = src.groups or dest.groups
+      dest.bench = src.bench or dest.bench
+      if src.announced ~= nil then
+        dest.announced = src.announced
+      end
+      if src.has_sheet then
+        dest.has_sheet = true
+      end
+      if src.title then
+        dest.title = src.title
+      end
+    end
+  end
+end
+
+local function finishApplyGroups(revision, syncedAt, raids, fromPlayer)
+  local any = false
+  for _ in pairs(raids or {}) do
+    any = true
+    break
+  end
+  if not any then
+    return
+  end
+  patchGroupsInto(beginPeerDB(), raids)
+  if type(GmbHLootTrackerHelperData) == "table" then
+    patchGroupsInto(GmbHLootTrackerHelperData, raids)
+  end
+  local data = beginPeerDB()
+  if type(data) == "table" then
+    if syncedAt and tostring(syncedAt) ~= "" then
+      data.raidSyncedAt = syncedAt
+    end
+    if revision and tostring(revision) ~= "" then
+      data.raidRevision = revision
+    end
+    data.syncSource = "guild"
+    data.syncFrom = fromPlayer
+  end
+  setSyncStatus(
+    "synced groups+bench from " .. tostring(fromPlayer or "?") .. " — open /gmbh to view",
+    { quiet = true }
+  )
 end
 
 -- Stream-decode across frames. Never build a full lines[] table (that alone freezes Classic).
@@ -2168,7 +2305,50 @@ local function newRaidDecoder()
 end
 
 local function skipRaidHeader(line)
-  return line == "" or line == "#RAID" or line == "#WL"
+  return line == "" or line == "#RAID" or line == "#WL" or line == "#GRPS"
+end
+
+-- Groups+bench only: ~40–80 short lines. Cheap enough for a higher per-frame budget.
+local function applyGroupsAsync(revision, syncedAt, blob, fromPlayer)
+  setSyncStatus("applying groups+bench…", { quiet = true })
+  blob = blob or ""
+  local grpStart = string.find(blob, "#GRPS\n", 1, true)
+  if grpStart then
+    blob = string.sub(blob, grpStart + 6)
+  end
+  local raids, feedLine = newRaidDecoder()
+  local pos, len = 1, #blob
+  local f = CreateFrame("Frame")
+  f:SetScript("OnUpdate", function(self)
+    local budget = 25
+    while budget > 0 and pos <= len do
+      local nl = string.find(blob, "\n", pos, true)
+      local line
+      if nl then
+        line = string.sub(blob, pos, nl - 1)
+        pos = nl + 1
+      else
+        line = string.sub(blob, pos)
+        pos = len + 1
+      end
+      if not skipRaidHeader(line) then
+        local ok, err = pcall(feedLine, line)
+        if not ok then
+          self:SetScript("OnUpdate", nil)
+          requestRetry("raid", fromPlayer, "Group sync apply failed — retrying… (" .. tostring(err) .. ")")
+          return
+        end
+      end
+      budget = budget - 1
+    end
+    if pos > len then
+      self:SetScript("OnUpdate", nil)
+      local ok, err = pcall(finishApplyGroups, revision, syncedAt, raids, fromPlayer)
+      if not ok then
+        requestRetry("raid", fromPlayer, "Group sync apply failed — retrying… (" .. tostring(err) .. ")")
+      end
+    end
+  end)
 end
 
 -- Decode raid lines from a single blob across frames (AceComm path).
@@ -2271,6 +2451,12 @@ local function onKindAddonMessage(kind, message, channel, sender)
     return
   end
 
+  local cmd, rest = message:match("^([^|]+)|?(.*)$")
+  if not cmd then
+    return
+  end
+  local bulk = cmd == "SYNCZ" or cmd == "SYNC" or cmd == "SYNCZG" or cmd == "SYNCG"
+
   if kind == "wl" then
     -- Local player must be allowed, and the peer must be on our guild roster
     -- with Officer / Headmaster (or equivalent) rank.
@@ -2281,18 +2467,44 @@ local function onKindAddonMessage(kind, message, channel, sender)
       return
     end
   else
-    ensureGuildRoster()
+    if not bulk then
+      ensureGuildRoster()
+    end
     if not senderIsGuildMember(sender) then
       return
     end
   end
 
   if sender then
-    Sync.MarkPeer(sender)
+    Sync.MarkPeer(sender, nil, bulk and { quiet = true } or nil)
   end
 
-  local cmd, rest = message:match("^([^|]+)|?(.*)$")
-  if not cmd then
+  -- Tiny groups+bench payload (not the full raid sheet).
+  if cmd == "SYNCZG" or cmd == "SYNCG" then
+    local rev, synced, wire = rest:match("^([^|]*)|([^\n]*)\n(.*)$")
+    if not rev or not wire then
+      return
+    end
+    setSyncStatus(
+      "receiving groups+bench from " .. tostring(sender or "?") .. " (AceComm+Deflate)…",
+      { quiet = true }
+    )
+    after(0.2, function()
+      local blob = wire
+      if cmd == "SYNCZG" then
+        local Comm = GmbHLootTrackerComm
+        if not (Comm and Comm.Decompress) then
+          printMsg("Received compressed groups but LibDeflate is missing — update the addon.")
+          return
+        end
+        blob = Comm.Decompress(wire)
+        if not blob then
+          printMsg("Failed to decompress groups from " .. tostring(sender or "?"))
+          return
+        end
+      end
+      applyGroupsAsync(rev, synced, blob, sender)
+    end)
     return
   end
 

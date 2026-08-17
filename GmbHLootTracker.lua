@@ -3401,6 +3401,11 @@ function UI:OnPeerPresence()
   if (self.raidView or "groups") ~= "groups" then
     return
   end
+  -- Rebuilding the Groups tab during AceComm apply freezes Classic.
+  local live = GmbHLootTrackerSync and GmbHLootTrackerSync.GetLiveStatus and GmbHLootTrackerSync.GetLiveStatus()
+  if live and live ~= "" then
+    return
+  end
   self:RenderRaidSheet()
 end
 
