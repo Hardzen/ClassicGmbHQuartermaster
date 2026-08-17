@@ -1372,7 +1372,7 @@ function UI:SetRaidView(view, opts)
       if self.assignHud then
         self.assignHud._userHidden = false
       end
-      self:RefreshAssignHud()
+      self:RefreshAssignHud({ manual = true })
     end
   end
 end
@@ -1549,6 +1549,15 @@ end
 local function preferFullHudAssignments()
   local dbc = type(GmbHLootTrackerCharDB) == "table" and GmbHLootTrackerCharDB or nil
   if dbc and tostring(dbc.hudAssignments or "") == "mine" then
+    return false
+  end
+  return true
+end
+
+-- Auto-open HUD in AQ40/Naxx on zone/target. Default on.
+local function hudAutoShowEnabled()
+  local dbc = type(GmbHLootTrackerCharDB) == "table" and GmbHLootTrackerCharDB or nil
+  if dbc and dbc.hudAutoShow == false then
     return false
   end
   return true
@@ -2227,6 +2236,21 @@ function UI:SetHudAssignmentsMode(mode)
     or "HUD: full assignments.")
 end
 
+function UI:IsHudAutoShowEnabled()
+  return hudAutoShowEnabled()
+end
+
+function UI:SetHudAutoShow(enabled)
+  charDB().hudAutoShow = enabled and true or false
+  self:RefreshOptionsPanel()
+  if enabled then
+    self:RefreshAssignHud()
+    printMsg("Assignment HUD auto-show on (pops up in AQ40/Naxx).")
+  else
+    printMsg("Assignment HUD auto-show off. Use /gmbh hud or Test HUD to open it.")
+  end
+end
+
 function UI:RefreshOptionsPanel()
   if not self.optionsPanel then
     return
@@ -2242,6 +2266,13 @@ function UI:RefreshOptionsPanel()
     self.optHudHint:SetText(full
       and "Assignment HUD shows every filled role for the current boss."
       or "Assignment HUD shows only roles assigned to you.")
+  end
+  local autoOn = hudAutoShowEnabled()
+  if self.optHudAutoOnBtn then
+    styleTabButton(self.optHudAutoOnBtn, autoOn)
+  end
+  if self.optHudAutoOffBtn then
+    styleTabButton(self.optHudAutoOffBtn, not autoOn)
   end
   if self.optHudScaleLabel then
     self.optHudScaleLabel:SetText(string.format("%d%%", math.floor(self:GetHudScale() * 100 + 0.5)))
@@ -2584,24 +2615,31 @@ function UI:EnsureAssignHud()
   return f
 end
 
-function UI:RefreshAssignHud()
+function UI:RefreshAssignHud(opts)
+  opts = opts or {}
   local f = self:EnsureAssignHud()
   -- Never re-anchor while the player is dragging or corner-resizing.
   if f._dragging or f._resizing then
     return
   end
+  local wasShown = f:IsShown() and true or false
   self:ApplyHudScale(f)
   local inst = instanceRaidSlug()
   if not inst and not self.hudTestBoss then
     f:Hide()
     return
   end
-  -- Targeting a boss should reopen the HUD even if it was hidden via /gmbh hud.
+  -- Targeting a boss should reopen the HUD even if it was hidden via /gmbh hud,
+  -- unless Options → Auto show is Off.
   local slug = self.hudTestSlug or inst
-  if slug and detectBossSectionLabelResolved(slug) then
+  if hudAutoShowEnabled() and slug and detectBossSectionLabelResolved(slug) then
     f._userHidden = false
   end
   if f._userHidden then
+    f:Hide()
+    return
+  end
+  if not hudAutoShowEnabled() and not opts.manual and not wasShown then
     f:Hide()
     return
   end
@@ -2689,7 +2727,7 @@ function UI:ToggleAssignHud()
     f._userHidden = false
     f._posApplied = false
     saveAssignHudPosition(f)
-    self:RefreshAssignHud()
+    self:RefreshAssignHud({ manual = true })
     if not f:IsShown() then
       printMsg("Assignment HUD: enter AQ40/Naxx, or /gmbh target <boss> to test.")
     else
@@ -2727,7 +2765,7 @@ function UI:SetHudTestTarget(query)
   self.hudTestBoss = label
   local f = self:EnsureAssignHud()
   f._userHidden = false
-  self:RefreshAssignHud()
+  self:RefreshAssignHud({ manual = true })
   printMsg(string.format(
     "HUD test: %s (%s). /gmbh target clear to stop.",
     label,
@@ -4184,8 +4222,36 @@ function UI:Create()
   optHint:SetTextColor(0.60, 0.66, 0.74)
   self.optHudHint = optHint
 
+  local optAutoTitle = makeLabel(optionsPanel, "Auto show", 12)
+  optAutoTitle:SetPoint("TOPLEFT", optHint, "BOTTOMLEFT", 0, -22)
+  optAutoTitle:SetTextColor(0.70, 0.76, 0.85)
+
+  local optAutoOn = makeMainTab(optionsPanel, "On", 70)
+  optAutoOn:SetPoint("TOPLEFT", optAutoTitle, "BOTTOMLEFT", 0, -12)
+  optAutoOn:SetScript("OnClick", function()
+    UI:SetHudAutoShow(true)
+  end)
+  self.optHudAutoOnBtn = optAutoOn
+
+  local optAutoOff = makeMainTab(optionsPanel, "Off", 70)
+  optAutoOff:SetPoint("LEFT", optAutoOn, "RIGHT", 8, 0)
+  optAutoOff:SetScript("OnClick", function()
+    UI:SetHudAutoShow(false)
+  end)
+  self.optHudAutoOffBtn = optAutoOff
+
+  local optAutoHint = makeLabel(
+    optionsPanel,
+    "On: HUD pops up in AQ40/Naxx when you target a boss. Off: only /gmbh hud or Test HUD.",
+    11
+  )
+  optAutoHint:SetPoint("TOPLEFT", optAutoOn, "BOTTOMLEFT", 0, -14)
+  optAutoHint:SetPoint("RIGHT", optionsPanel, "RIGHT", -18, 0)
+  optAutoHint:SetTextColor(0.60, 0.66, 0.74)
+  self.optHudAutoHint = optAutoHint
+
   local optSizeTitle = makeLabel(optionsPanel, "HUD size", 12)
-  optSizeTitle:SetPoint("TOPLEFT", optHint, "BOTTOMLEFT", 0, -22)
+  optSizeTitle:SetPoint("TOPLEFT", optAutoHint, "BOTTOMLEFT", 0, -22)
   optSizeTitle:SetTextColor(0.70, 0.76, 0.85)
 
   local optSmaller = makeMainTab(optionsPanel, "Smaller", 80)
