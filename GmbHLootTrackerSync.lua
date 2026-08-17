@@ -1971,8 +1971,9 @@ function Sync.Share(toPlayer, opts)
     return false
   end
   -- Only the elected authority answers broadcast pulls (targeted share still allowed).
+  -- opts.force: officer Push sync button — blast even if another client is authority.
   local targeted = toPlayer and tostring(toPlayer) ~= ""
-  if not targeted and not Sync.IsSyncAuthority("wl") then
+  if not targeted and not opts.force and not Sync.IsSyncAuthority("wl") then
     if not quiet then
       printMsg(Sync.SyncAuthorityStatus("wl") .. " — not sharing.")
     end
@@ -1985,7 +1986,7 @@ function Sync.Share(toPlayer, opts)
     return false
   end
   local now = GetTime()
-  if not targeted and now - lastShareAt.wl < SHARE_COOLDOWN then
+  if not targeted and not opts.force and now - lastShareAt.wl < SHARE_COOLDOWN then
     if not quiet then
       printMsg(string.format("Share cooldown (%ds).", math.ceil(SHARE_COOLDOWN - (now - lastShareAt.wl))))
     end
@@ -2039,18 +2040,25 @@ function Sync.ShareRaid(toPlayer, opts)
   end
   local targeted = toPlayer and tostring(toPlayer) ~= ""
   -- Multi-master: any unlocked copy can targeted-share / answer REQ.
-  -- Untargeted group blast stays authority-only (avoids N× AceComm storms).
-  if not targeted and not Sync.IsSyncAuthority("raid") then
+  -- Untargeted group blast stays authority-only (avoids N× AceComm storms),
+  -- unless an officer hits Push sync (opts.force).
+  if not targeted and not opts.force and not Sync.IsSyncAuthority("raid") then
     if not quiet then
       printMsg(Sync.SyncAuthorityStatus("raid") .. " — not broadcasting (relay via whisper/REQ still OK).")
     end
     return false
   end
   if shareBusy.raid then
+    if not quiet then
+      printMsg("Raid share already in progress…")
+    end
     return false
   end
   local now = GetTime()
-  if not targeted and now - lastShareAt.raid < SHARE_COOLDOWN then
+  if not targeted and not opts.force and now - lastShareAt.raid < SHARE_COOLDOWN then
+    if not quiet then
+      printMsg(string.format("Share cooldown (%ds).", math.ceil(SHARE_COOLDOWN - (now - lastShareAt.raid))))
+    end
     return false
   end
   local data = db()
@@ -2096,6 +2104,32 @@ function Sync.ShareRaid(toPlayer, opts)
     return true
   end
   return aceSharePayload("raid", rev, synced, lines, dest, quiet)
+end
+
+-- Officer header button: force-broadcast announced raid (+ wishlist) now.
+function Sync.PushSync()
+  if not Sync.CanUseWishlist() then
+    printMsg("Push sync is for Classic GmbH Officer / Headmaster ranks.")
+    return false
+  end
+  local force = { force = true }
+  local any = false
+  if Sync.CanShareRaid() then
+    if Sync.ShareRaid(nil, force) then
+      any = true
+    end
+  else
+    printMsg("No announced raid sheet to push (announce on the website, then run the helper).")
+  end
+  if Sync.HasWishlistData() then
+    if Sync.Share(nil, force) then
+      any = true
+    end
+  end
+  if any then
+    printMsg("Push sync sent. Nearby guild/raid members should receive within a few seconds.")
+  end
+  return any
 end
 
 local requestRetry -- forward decl (used by apply paths)

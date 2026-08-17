@@ -850,10 +850,26 @@ local function makeTextButton(parent, label, width)
   return btn
 end
 
+function UI:RefreshOfficerControls()
+  local officer = GmbHLootTrackerSync and GmbHLootTrackerSync.CanUseWishlist and GmbHLootTrackerSync.CanUseWishlist()
+  if self.pushSyncBtn then
+    if officer then
+      self.pushSyncBtn:Show()
+    else
+      self.pushSyncBtn:Hide()
+    end
+  end
+  if self.syncLabel and self.reloadBtn then
+    local right = (officer and self.pushSyncBtn) or self.reloadBtn
+    self.syncLabel:SetPoint("RIGHT", right, "LEFT", -8, 0)
+  end
+end
+
 function UI:RefreshSyncLabel()
   if not self.syncLabel then
     return
   end
+  self:RefreshOfficerControls()
   local data = db()
   local hasData = type(data) == "table" and data.syncedAt and tostring(data.syncedAt) ~= ""
   if not hasData and GmbHLootTrackerSync and GmbHLootTrackerSync.HasSyncedPayload then
@@ -1006,6 +1022,7 @@ end
 
 function UI:RefreshWishlistTabVisibility()
   local canWl = GmbHLootTrackerSync and GmbHLootTrackerSync.CanUseWishlist and GmbHLootTrackerSync.CanUseWishlist()
+  self:RefreshOfficerControls()
   if self.tabWishlist then
     if canWl then
       self.tabWishlist:Show()
@@ -3967,6 +3984,7 @@ end
 function UI:Show()
   self:Create()
   self._dataDirty = false
+  self:RefreshOfficerControls()
   self:RefreshSyncLabel()
   self.frame:Show()
   self.raidViewUserPinned = false
@@ -4010,6 +4028,16 @@ function UI:Create()
     ReloadUI()
   end)
   self.reloadBtn = reloadBtn
+
+  local pushBtn = makeTextButton(f, "Push sync", 90)
+  pushBtn:SetPoint("RIGHT", reloadBtn, "LEFT", -6, 0)
+  pushBtn:SetScript("OnClick", function()
+    if GmbHLootTrackerSync and GmbHLootTrackerSync.PushSync then
+      GmbHLootTrackerSync.PushSync()
+    end
+  end)
+  pushBtn:Hide()
+  self.pushSyncBtn = pushBtn
 
   self.syncLabel = makeLabel(f, "Last synced: —", 11)
   self.syncLabel:SetPoint("TOPLEFT", title, "BOTTOMLEFT", 0, -6)
@@ -4365,6 +4393,7 @@ function UI:Create()
   self.mainTab = "raid"
   self.raidSlug = defaultRaid()
   self.frame = f
+  self:RefreshOfficerControls()
 end
 
 -- ---------------------------------------------------------------------------
@@ -4518,7 +4547,7 @@ local function cmdNeed(itemIdRaw)
 end
 
 local function usage()
-  printMsg("Commands: /gmbh | hud | minimap | hudscale <%> | target <boss> | debug | status | groups | sort | assign | wl | need")
+  printMsg("Commands: /gmbh | hud | minimap | hudscale <%> | target <boss> | debug | status | push | groups | sort | assign | wl | need")
 end
 
 SLASH_GMBH1 = "/gmbh"
@@ -4535,6 +4564,12 @@ SlashCmdList["GMBH"] = function(msg)
   end
   if msg == "status" or msg == "sync" then
     cmdStatus()
+    return
+  end
+  if msg == "push" or msg == "pushsync" or msg == "share" then
+    if GmbHLootTrackerSync and GmbHLootTrackerSync.PushSync then
+      GmbHLootTrackerSync.PushSync()
+    end
     return
   end
   if msg == "hud" or msg == "assignhud" or msg == "myassign" then
