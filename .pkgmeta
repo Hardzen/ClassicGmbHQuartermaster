@@ -1,0 +1,6 @@
+package-as: ClassicGmbHQuartermaster
+enable-nolib-creation: no
+ignore:
+  - write_helperdata.py
+  - example_helperdata.json
+  - CURSEFORGE.md
