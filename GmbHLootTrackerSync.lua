@@ -10,7 +10,7 @@ local PREFIX_RAID = "GMBHRS"
 local PREFIX_GROUPS = "GMBHGP"
 local PRESENCE_PREFIX = "GMBHPR"
 -- Keep in sync with ## Version in ClassicGmbHQuartermaster.toc (Classic metadata API often returns nil).
-local ADDON_VERSION = "1.8.81"
+local ADDON_VERSION = "1.8.83"
 local SHARE_COOLDOWN = 20
 local APPLY_LINES_PER_FRAME = 4
 local PRESENCE_TTL = 900
