@@ -252,8 +252,61 @@ local function raidHasAssignments(raids)
   return false
 end
 
+local function seatHasPlayer(p)
+  return type(p) == "table" and tostring(p.name or p.player_name or "") ~= ""
+end
+
+local function groupsHavePlayers(groups)
+  if type(groups) ~= "table" then
+    return false
+  end
+  for gi = 1, 8 do
+    local g = groups[gi]
+    if type(g) == "table" then
+      for si = 1, 5 do
+        if seatHasPlayer(g[si]) then
+          return true
+        end
+      end
+      for _, p in ipairs(g) do
+        if seatHasPlayer(p) then
+          return true
+        end
+      end
+    end
+  end
+  return false
+end
+
+local function benchHasPlayers(bench)
+  if type(bench) ~= "table" then
+    return false
+  end
+  for _, p in ipairs(bench) do
+    if seatHasPlayer(p) then
+      return true
+    end
+  end
+  return false
+end
+
+local function raidHasGroups(raids)
+  if type(raids) ~= "table" then
+    return false
+  end
+  for _, raid in pairs(raids) do
+    if type(raid) == "table" and groupsHavePlayers(raid.groups) then
+      return true
+    end
+  end
+  return false
+end
+
 -- Groups payload must not wipe boss slots; assignment payload must not wipe G1–G8.
-local function patchGroupsInto(data, incoming)
+-- opts.preserveFilled: never replace filled G1–G8/bench with empty tables ({} is truthy in Lua).
+local function patchGroupsInto(data, incoming, opts)
+  opts = opts or {}
+  local preserveFilled = opts.preserveFilled and true or false
   if type(data) ~= "table" then
     return
   end
@@ -273,8 +326,22 @@ local function patchGroupsInto(data, incoming)
         }
         data.raids[slug] = dest
       end
-      dest.groups = src.groups or dest.groups
-      dest.bench = src.bench or dest.bench
+      if type(src.groups) == "table" then
+        if (not preserveFilled)
+          or groupsHavePlayers(src.groups)
+          or not groupsHavePlayers(dest.groups)
+        then
+          dest.groups = src.groups
+        end
+      end
+      if type(src.bench) == "table" then
+        if (not preserveFilled)
+          or benchHasPlayers(src.bench)
+          or not benchHasPlayers(dest.bench)
+        then
+          dest.bench = src.bench
+        end
+      end
       if src.announced ~= nil then
         dest.announced = src.announced
       end
@@ -361,11 +428,16 @@ local function overlayPeerFromSV(h, s)
   end
   if type(s.raids) == "table" then
     -- Merge; never replace the whole table (groups-only SV would wipe helper slots).
-    patchGroupsInto(h, s.raids)
+    -- Empty SV groups are truthy in Lua — preserveFilled blocks wiping helper G1–G8.
+    local sRaidAt = s.raidSyncedAt or s.syncedAt or ""
+    local hRaidAt = h.raidSyncedAt or h.syncedAt or ""
+    local svHasGroups = raidHasGroups(s.raids)
+    local helperHasGroups = raidHasGroups(h.raids)
+    if (not helperHasGroups) or (svHasGroups and stampNewer(sRaidAt, hRaidAt)) then
+      patchGroupsInto(h, s.raids, { preserveFilled = true })
+    end
     if raidHasAssignments(s.raids) then
       local helperHasAssign = raidHasAssignments(h.raids)
-      local sRaidAt = s.raidSyncedAt or s.syncedAt or ""
-      local hRaidAt = h.raidSyncedAt or h.syncedAt or ""
       if (not helperHasAssign) or stampNewer(sRaidAt, hRaidAt) then
         patchAssignmentsInto(h, s.raids)
         h.raidSyncedAt = s.raidSyncedAt or sRaidAt
@@ -2256,9 +2328,10 @@ local function finishApplyGroups(revision, syncedAt, raids, fromPlayer)
   if not any then
     return
   end
-  patchGroupsInto(beginPeerDB(), raids)
+  -- RMETA-only payloads have empty groups={}; {} is truthy and used to wipe HelperData G1–G8.
+  patchGroupsInto(beginPeerDB(), raids, { preserveFilled = true })
   if type(GmbHLootTrackerHelperData) == "table" then
-    patchGroupsInto(GmbHLootTrackerHelperData, raids)
+    patchGroupsInto(GmbHLootTrackerHelperData, raids, { preserveFilled = true })
   end
   local data = beginPeerDB()
   if type(data) == "table" then
