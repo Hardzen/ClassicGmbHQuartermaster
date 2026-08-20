@@ -882,21 +882,20 @@ function UI:RefreshSyncLabel()
   end
   local rankBit = rank and ("  ·  rank " .. rank) or ""
   local mine = (GmbHLootTrackerSync and GmbHLootTrackerSync.LocalVersion and GmbHLootTrackerSync.LocalVersion())
-    or (GetAddOnMetadata and GetAddOnMetadata("ClassicGmbHQuartermaster", "Version"))
-    or nil
-  local verBit = mine and ("  ·  v" .. tostring(mine)) or ""
+    or "?"
+  local verBit = "  ·  v" .. tostring(mine)
   if GmbHLootTrackerSync and GmbHLootTrackerSync.HasNewerVersion then
     local newer, best, who = GmbHLootTrackerSync.HasNewerVersion()
     if newer then
       verBit = string.format(
         "  ·  v%s  ·  |cffffcc00update %s|r%s",
-        tostring(mine or "?"),
+        tostring(mine),
         tostring(best),
         who and (" (via " .. tostring(who) .. ")") or ""
       )
     end
   end
-  if self.titleLabel and mine then
+  if self.titleLabel then
     self.titleLabel:SetText("Classic GmbH Quartermaster  |cff9aa7b8v" .. tostring(mine) .. "|r")
   end
 
@@ -4054,7 +4053,6 @@ function UI:Create()
   local title = f:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
   title:SetPoint("TOPLEFT", 16, -14)
   local addonVer = (GmbHLootTrackerSync and GmbHLootTrackerSync.LocalVersion and GmbHLootTrackerSync.LocalVersion())
-    or (GetAddOnMetadata and GetAddOnMetadata("ClassicGmbHQuartermaster", "Version"))
     or "?"
   title:SetText("Classic GmbH Quartermaster  |cff9aa7b8v" .. tostring(addonVer) .. "|r")
   title:SetTextColor(0.95, 0.96, 0.98)

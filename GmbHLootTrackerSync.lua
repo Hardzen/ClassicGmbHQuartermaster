@@ -9,6 +9,8 @@ local PREFIX_WL = "GMBHWL"
 local PREFIX_RAID = "GMBHRS"
 local PREFIX_GROUPS = "GMBHGP"
 local PRESENCE_PREFIX = "GMBHPR"
+-- Keep in sync with ## Version in ClassicGmbHQuartermaster.toc (Classic metadata API often returns nil).
+local ADDON_VERSION = "1.8.81"
 local SHARE_COOLDOWN = 20
 local APPLY_LINES_PER_FRAME = 4
 local PRESENCE_TTL = 900
@@ -563,11 +565,18 @@ local function notifyPresenceUi()
 end
 
 function Sync.LocalVersion()
-  local v = GetAddOnMetadata and GetAddOnMetadata("ClassicGmbHQuartermaster", "Version")
-  if v and tostring(v) ~= "" then
+  local name = "ClassicGmbHQuartermaster"
+  local v
+  if C_AddOns and C_AddOns.GetAddOnMetadata then
+    v = C_AddOns.GetAddOnMetadata(name, "Version")
+  end
+  if (not v or tostring(v) == "") and GetAddOnMetadata then
+    v = GetAddOnMetadata(name, "Version")
+  end
+  if v and tostring(v) ~= "" and tostring(v) ~= "0" then
     return tostring(v)
   end
-  return "0"
+  return ADDON_VERSION
 end
 
 local function parseVersion(v)
