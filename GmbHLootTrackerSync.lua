@@ -10,7 +10,7 @@ local PREFIX_RAID = "GMBHRS"
 local PREFIX_GROUPS = "GMBHGP"
 local PRESENCE_PREFIX = "GMBHPR"
 -- Keep in sync with ## Version in ClassicGmbHQuartermaster.toc (Classic metadata API often returns nil).
-local ADDON_VERSION = "1.8.83"
+local ADDON_VERSION = "1.8.85"
 local SHARE_COOLDOWN = 20
 local APPLY_LINES_PER_FRAME = 4
 local PRESENCE_TTL = 900
@@ -604,6 +604,47 @@ function Sync.CompareVersions(a, b)
   return 0
 end
 
+local function charPrefs()
+  if type(GmbHLootTrackerCharDB) ~= "table" then
+    GmbHLootTrackerCharDB = {}
+  end
+  return GmbHLootTrackerCharDB
+end
+
+local function alreadyShownUpdateNotice(fromVer)
+  if warnedNewerVersion and Sync.CompareVersions(fromVer, warnedNewerVersion) <= 0 then
+    return true
+  end
+  local shown = charPrefs().updateNoticeVersion
+  if shown and Sync.CompareVersions(fromVer, shown) <= 0 then
+    warnedNewerVersion = shown
+    return true
+  end
+  return false
+end
+
+function Sync.MarkUpdateNoticeShown(ver)
+  if not ver or tostring(ver) == "" then
+    return
+  end
+  local v = tostring(ver)
+  warnedNewerVersion = v
+  local dbc = charPrefs()
+  local prev = dbc.updateNoticeVersion
+  if not prev or Sync.CompareVersions(v, prev) > 0 then
+    dbc.updateNoticeVersion = v
+  end
+end
+
+local function updateNoticeText(mine, fromName, fromVer)
+  return string.format(
+    "|cffffcc00Update available:|r you have |cffffffff%s|r, |cff66ccff%s|r has |cffffffff%s|r — update Classic GmbH Quartermaster.",
+    tostring(mine),
+    bareName(fromName),
+    tostring(fromVer)
+  )
+end
+
 local function maybeWarnNewerVersion(fromName, fromVer)
   if not fromVer or fromVer == "" then
     return
@@ -612,16 +653,17 @@ local function maybeWarnNewerVersion(fromName, fromVer)
   if Sync.CompareVersions(fromVer, mine) <= 0 then
     return
   end
-  if warnedNewerVersion == fromVer then
+  if alreadyShownUpdateNotice(fromVer) then
+    notifyPresenceUi()
     return
   end
-  warnedNewerVersion = fromVer
-  printMsg(string.format(
-    "|cffffcc00Update available:|r you have |cffffffff%s|r, |cff66ccff%s|r has |cffffffff%s|r — update Classic GmbH Quartermaster.",
-    mine,
-    bareName(fromName),
-    fromVer
-  ))
+  local ui = GmbHLootTrackerUI
+  if ui and ui.ShowUpdateNotice then
+    ui:ShowUpdateNotice(mine, fromVer, bareName(fromName))
+  else
+    Sync.MarkUpdateNoticeShown(fromVer)
+    printMsg(updateNoticeText(mine, fromName, fromVer))
+  end
   notifyPresenceUi()
 end
 

@@ -168,17 +168,42 @@ local function boardMatches(board, pats)
     sid = string.lower(tostring(board.slots[1].id or ""))
   end
   for _, pat in ipairs(pats) do
-    if (id ~= "" and string.find(id, pat, 1, true))
-      or (label ~= "" and string.find(label, pat, 1, true))
-      or (sid ~= "" and string.find(sid, pat, 1, true))
-    then
+    pat = string.lower(tostring(pat or ""))
+    if pat == "" then
+      -- skip
+    elseif id ~= "" and id == pat then
       return true
+    elseif id ~= "" and string.find(id, pat, 1, true) then
+      -- Avoid short pats matching inside longer ids (e.g. "pi" ⊂ "pi_chains").
+      if #pat >= 3 or id == pat then
+        return true
+      end
+    elseif label ~= "" and string.find(label, pat, 1, true) then
+      -- Avoid short pats matching inside words (e.g. "pi" ⊂ "Spirit").
+      if #pat >= 3 then
+        return true
+      end
+    elseif sid ~= "" and string.find(sid, pat, 1, true) then
+      if #pat >= 3 or sid == pat or string.sub(sid, 1, #pat + 1) == pat .. "_" then
+        return true
+      end
     end
   end
   return false
 end
 
 local function findBoard(section, pats)
+  -- Prefer exact board id match before fuzzy label/id contains.
+  for _, pat in ipairs(pats or {}) do
+    local want = string.lower(tostring(pat or ""))
+    if want ~= "" then
+      for _, board in ipairs(section.boards or {}) do
+        if string.lower(tostring(board.id or "")) == want then
+          return board
+        end
+      end
+    end
+  end
   for _, board in ipairs(section.boards or {}) do
     if boardMatches(board, pats) then
       return board
@@ -409,9 +434,9 @@ local function renderBuffs(ctx, section)
   local fort = findBoard(section, { "fort" })
   local ai = findBoard(section, { "ai", "arcane", "intellect" })
   local motw = findBoard(section, { "motw", "mark of the wild", "wild" })
-  local pi = findBoard(section, { "pi", "power infusion", "infusion" })
+  local pi = findBoard(section, { "pi", "power infusion" })
   local dm = findBoard(section, { "detect" })
-  local chains = findBoard(section, { "innervate", "soulstone", "chain" })
+  local chains = findBoard(section, { "pi_chains", "innervate", "soulstone", "chain" })
   local deb = findBoard(section, { "debuff" })
 
   local fortSlots = (fort and fort.slots) or {}
@@ -437,12 +462,35 @@ local function renderBuffs(ctx, section)
   local piSlots = (pi and pi.slots) or {}
   if #piSlots > 0 then
     ctx:subhead("Power Infusion")
-    local pairCount = math.floor(#piSlots / 2)
-    for i = 0, pairCount - 1 do
-      local src = piSlots[i * 2 + 1]
-      local dst = piSlots[i * 2 + 2]
-      if slotFilled(src) or i < 2 then
+    -- Pair by slot id (pi_priest_N → pi_target_N), not array position — peer sync
+    -- may omit empty seats and positional pairing then mis-pairs priests.
+    local byId = {}
+    for _, slot in ipairs(piSlots) do
+      if type(slot) == "table" and slot.id then
+        byId[string.lower(tostring(slot.id))] = slot
+      end
+    end
+    local paired = false
+    for i = 1, 4 do
+      local src = byId["pi_priest_" .. i] or byId["aq_pi_p" .. i]
+      local dst = byId["pi_target_" .. i] or byId["aq_pi_t" .. i]
+      if not src and not dst then
+        -- Fall back to positional pairs when ids are missing (legacy payloads).
+        break
+      end
+      paired = true
+      if slotFilled(src) or i <= 2 then
         ctx:addLine(string.format("%s  >>  %s", slotText(src), slotText(dst)), 0.85, 0.88, 0.92, 10)
+      end
+    end
+    if not paired then
+      local pairCount = math.floor(#piSlots / 2)
+      for i = 0, pairCount - 1 do
+        local src = piSlots[i * 2 + 1]
+        local dst = piSlots[i * 2 + 2]
+        if slotFilled(src) or i < 2 then
+          ctx:addLine(string.format("%s  >>  %s", slotText(src), slotText(dst)), 0.85, 0.88, 0.92, 10)
+        end
       end
     end
     ctx:gap(4)

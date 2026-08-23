@@ -4020,12 +4020,104 @@ function UI:SetMinimapButtonShown(shown)
   printMsg(shown and "Minimap button shown." or "Minimap button hidden. /gmbh minimap to show.")
 end
 
+local CHROME_TAB_Y = -58
+local CHROME_PANEL_Y = -92
+local CHROME_BANNER_SHIFT = 28
+
+function UI:LayoutChrome(bannerOn)
+  local tabY = CHROME_TAB_Y - (bannerOn and CHROME_BANNER_SHIFT or 0)
+  local panelY = CHROME_PANEL_Y - (bannerOn and CHROME_BANNER_SHIFT or 0)
+  if self.tabRaid then
+    self.tabRaid:SetPoint("TOPLEFT", 16, tabY)
+  end
+  for _, panel in ipairs({ self.raidPanel, self.optionsPanel, self.lockPanel, self.contentPanel }) do
+    if panel then
+      panel:ClearAllPoints()
+      panel:SetPoint("TOPLEFT", 16, panelY)
+      panel:SetPoint("BOTTOMRIGHT", -16, 16)
+    end
+  end
+end
+
+function UI:EnsureUpdateBanner()
+  if self.updateBanner or not self.frame then
+    return
+  end
+  local banner = CreateFrame("Frame", nil, self.frame, BackdropTemplateMixin and "BackdropTemplate" or nil)
+  banner:SetHeight(24)
+  banner:SetPoint("TOPLEFT", 16, -52)
+  banner:SetPoint("TOPRIGHT", -16, -52)
+  setBackdrop(banner)
+  if banner.SetBackdropColor then
+    banner:SetBackdropColor(0.22, 0.16, 0.06, 0.96)
+    banner:SetBackdropBorderColor(0.85, 0.70, 0.30, 1)
+  end
+  local label = makeLabel(banner, "", 11)
+  label:SetPoint("LEFT", 8, 0)
+  label:SetPoint("RIGHT", -52, 0)
+  label:SetTextColor(1, 0.85, 0.45)
+  banner.label = label
+  local ok = makeTextButton(banner, "OK", 40)
+  ok:SetPoint("RIGHT", -4, 0)
+  ok:SetScript("OnClick", function()
+    UI:DismissUpdateBanner()
+  end)
+  banner:Hide()
+  self.updateBanner = banner
+end
+
+function UI:DismissUpdateBanner()
+  self._pendingUpdateNotice = nil
+  if self.updateBanner then
+    self.updateBanner:Hide()
+  end
+  self:LayoutChrome(false)
+end
+
+function UI:FlushUpdateNotice()
+  local notice = self._pendingUpdateNotice
+  if not notice or not self.frame then
+    return
+  end
+  self:EnsureUpdateBanner()
+  if not self.updateBanner then
+    return
+  end
+  local who = notice.who and tostring(notice.who) ~= "" and tostring(notice.who) or "a guildmate"
+  self.updateBanner.label:SetText(string.format(
+    "|cffffcc00Update available:|r you have |cffffffff%s|r, |cff66ccff%s|r has |cffffffff%s|r — update Classic GmbH Quartermaster.",
+    tostring(notice.mine or "?"),
+    who,
+    tostring(notice.best or "?")
+  ))
+  self.updateBanner:Show()
+  self:LayoutChrome(true)
+  self._pendingUpdateNotice = nil
+  if GmbHLootTrackerSync and GmbHLootTrackerSync.MarkUpdateNoticeShown then
+    GmbHLootTrackerSync.MarkUpdateNoticeShown(notice.best)
+  end
+end
+
+function UI:ShowUpdateNotice(mine, best, who)
+  local whoName = tostring(who or "")
+  whoName = whoName:match("^([^%-]+)") or whoName
+  self._pendingUpdateNotice = {
+    mine = tostring(mine or ""),
+    best = tostring(best or ""),
+    who = whoName,
+  }
+  if self.frame and self.frame:IsShown() then
+    self:FlushUpdateNotice()
+  end
+end
+
 function UI:Show()
   self:Create()
   self._dataDirty = false
   self:RefreshOfficerControls()
   self:RefreshSyncLabel()
   self.frame:Show()
+  self:FlushUpdateNotice()
   self.raidViewUserPinned = false
   -- Default: raid sheet for everyone. Wishlist is opt-in via tab.
   -- Always rebuild from current DB here — this is the only place sync data is painted.
@@ -4049,6 +4141,12 @@ function UI:Create()
   f:Hide()
   setBackdrop(f)
   tinsert(UISpecialFrames, "GmbHLootTrackerFrame")
+  f:SetScript("OnHide", function()
+    if UI.updateBanner then
+      UI.updateBanner:Hide()
+    end
+    UI:LayoutChrome(false)
+  end)
 
   local title = f:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
   title:SetPoint("TOPLEFT", 16, -14)
@@ -4109,6 +4207,7 @@ function UI:Create()
   end)
   self.tabOptions = tabOptions
   self:RefreshWishlistTabVisibility()
+  self:EnsureUpdateBanner()
 
   -- ---- Raid sheet panel (all ranks) — next upcoming raid only ----
   local raidPanel = CreateFrame("Frame", nil, f, BackdropTemplateMixin and "BackdropTemplate" or nil)
