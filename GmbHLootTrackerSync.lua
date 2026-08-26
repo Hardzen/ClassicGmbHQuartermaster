@@ -10,7 +10,7 @@ local PREFIX_RAID = "GMBHRS"
 local PREFIX_GROUPS = "GMBHGP"
 local PRESENCE_PREFIX = "GMBHPR"
 -- Keep in sync with ## Version in ClassicGmbHQuartermaster.toc (Classic metadata API often returns nil).
-local ADDON_VERSION = "1.8.85"
+local ADDON_VERSION = "1.8.86"
 local SHARE_COOLDOWN = 20
 local APPLY_LINES_PER_FRAME = 4
 local PRESENCE_TTL = 900
@@ -604,6 +604,18 @@ function Sync.CompareVersions(a, b)
   return 0
 end
 
+local function isUsableVersion(v)
+  if not v then
+    return false
+  end
+  local s = tostring(v)
+  if s == "" or s == "0" then
+    return false
+  end
+  local a, b, c = parseVersion(s)
+  return (a > 0) or (b > 0) or (c > 0)
+end
+
 local function charPrefs()
   if type(GmbHLootTrackerCharDB) ~= "table" then
     GmbHLootTrackerCharDB = {}
@@ -612,7 +624,8 @@ local function charPrefs()
 end
 
 local function alreadyShownUpdateNotice(fromVer)
-  if warnedNewerVersion and Sync.CompareVersions(fromVer, warnedNewerVersion) <= 0 then
+  -- One notice per session. Reloads only show again if a still-newer build appears.
+  if warnedNewerVersion then
     return true
   end
   local shown = charPrefs().updateNoticeVersion
@@ -624,7 +637,7 @@ local function alreadyShownUpdateNotice(fromVer)
 end
 
 function Sync.MarkUpdateNoticeShown(ver)
-  if not ver or tostring(ver) == "" then
+  if not isUsableVersion(ver) then
     return
   end
   local v = tostring(ver)
@@ -636,33 +649,25 @@ function Sync.MarkUpdateNoticeShown(ver)
   end
 end
 
-local function updateNoticeText(mine, fromName, fromVer)
-  return string.format(
-    "|cffffcc00Update available:|r you have |cffffffff%s|r, |cff66ccff%s|r has |cffffffff%s|r — update Classic GmbH Quartermaster.",
-    tostring(mine),
-    bareName(fromName),
-    tostring(fromVer)
-  )
-end
-
+-- Never print this to chat — it spams the raid when many peers announce.
 local function maybeWarnNewerVersion(fromName, fromVer)
-  if not fromVer or fromVer == "" then
+  if not isUsableVersion(fromVer) then
     return
   end
   local mine = Sync.LocalVersion()
+  if not isUsableVersion(mine) then
+    return
+  end
   if Sync.CompareVersions(fromVer, mine) <= 0 then
     return
   end
   if alreadyShownUpdateNotice(fromVer) then
-    notifyPresenceUi()
     return
   end
+  Sync.MarkUpdateNoticeShown(fromVer)
   local ui = GmbHLootTrackerUI
   if ui and ui.ShowUpdateNotice then
     ui:ShowUpdateNotice(mine, fromVer, bareName(fromName))
-  else
-    Sync.MarkUpdateNoticeShown(fromVer)
-    printMsg(updateNoticeText(mine, fromName, fromVer))
   end
   notifyPresenceUi()
 end
@@ -719,7 +724,7 @@ function Sync.NewestKnownVersion()
   local who = nil
   local now = GetTime()
   for key, row in pairs(peers) do
-    if row and row.t and (now - row.t) <= PRESENCE_TTL and row.ver then
+    if row and row.t and (now - row.t) <= PRESENCE_TTL and isUsableVersion(row.ver) then
       if Sync.CompareVersions(row.ver, best) > 0 then
         best = row.ver
         who = key
@@ -730,11 +735,15 @@ function Sync.NewestKnownVersion()
 end
 
 function Sync.HasNewerVersion()
+  local mine = Sync.LocalVersion()
+  if not isUsableVersion(mine) then
+    return false, mine, nil
+  end
   local best, who = Sync.NewestKnownVersion()
-  if Sync.CompareVersions(best, Sync.LocalVersion()) > 0 then
+  if isUsableVersion(best) and Sync.CompareVersions(best, mine) > 0 then
     return true, best, who
   end
-  return false, Sync.LocalVersion(), nil
+  return false, mine, nil
 end
 
 local function presencePayload(cmd)
