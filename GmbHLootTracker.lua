@@ -1955,6 +1955,40 @@ function UI:CollectPersonalAssignments(section, raid)
   return lines
 end
 
+-- Loatheb HUD: Spore Group 1, then 2, … with P1–P5 together. Do not hoist "(you)".
+local function hudAssignmentSortKey(board, slot, boardIdx, slotIdx)
+  local bid = string.lower(tostring((board and board.id) or ""))
+  local sid = string.lower(tostring((slot and slot.id) or ""))
+  local lab = tostring((board and (board.label or board.mob)) or "")
+  local group = tonumber(bid:match("spore_(%d+)"))
+    or tonumber(sid:match("^spore_(%d+)_"))
+    or tonumber(lab:match("[Gg]roup%s+(%d+)"))
+  local seat = tonumber(sid:match("^spore_%d+_(%d+)$"))
+    or tonumber(tostring((slot and slot.label) or ""):match("^[Pp]%s*(%d+)$"))
+  local bucket = group and 2 or 1
+  return bucket, group or 0, seat or 0, boardIdx or 0, slotIdx or 0
+end
+
+local function sortHudAssignmentRows(rows)
+  table.sort(rows, function(a, b)
+    local a1, a2, a3, a4, a5 = hudAssignmentSortKey(a.board, a.slot, a.boardIdx, a.slotIdx)
+    local b1, b2, b3, b4, b5 = hudAssignmentSortKey(b.board, b.slot, b.boardIdx, b.slotIdx)
+    if a1 ~= b1 then
+      return a1 < b1
+    end
+    if a2 ~= b2 then
+      return a2 < b2
+    end
+    if a3 ~= b3 then
+      return a3 < b3
+    end
+    if a4 ~= b4 then
+      return a4 < b4
+    end
+    return a5 < b5
+  end)
+end
+
 function UI:CollectAllBossAssignments(section, raid)
   if isCthunSection(section) then
     return self:CollectCthunHudLines(section, true)
@@ -1963,8 +1997,8 @@ function UI:CollectAllBossAssignments(section, raid)
     return {}
   end
   local me = myPlayerKey()
-  local tankLines = {}
-  local otherLines = {}
+  local tankRows = {}
+  local otherRows = {}
   local sectionLabel = tostring(section.label or "")
   local patchwerk = isPatchwerkSection(section)
 
@@ -1993,10 +2027,10 @@ function UI:CollectAllBossAssignments(section, raid)
     return lines
   end
 
-  for _, entry in ipairs(boards) do
+  for boardIdx, entry in ipairs(boards) do
     local board = entry.board
     local boardLab = tostring(board.label or "")
-    for _, slot in ipairs(board.slots or {}) do
+    for slotIdx, slot in ipairs(board.slots or {}) do
       local role = tostring(slot.label or "?")
       local prefix = shortBoardPrefix(boardLab, sectionLabel, role)
       if prefix then
@@ -2013,22 +2047,30 @@ function UI:CollectAllBossAssignments(section, raid)
         else
           mark = hudSlotMark(slot, nil)
         end
-        local line = formatHudAssignmentLine(role, slot, me, mark)
+        local row = {
+          line = formatHudAssignmentLine(role, slot, me, mark),
+          board = board,
+          slot = slot,
+          boardIdx = boardIdx,
+          slotIdx = slotIdx,
+        }
         if tanking then
-          table.insert(tankLines, line)
+          table.insert(tankRows, row)
         else
-          table.insert(otherLines, line)
+          table.insert(otherRows, row)
         end
       end
     end
   end
 
+  sortHudAssignmentRows(tankRows)
+  sortHudAssignmentRows(otherRows)
   local lines = {}
-  for _, line in ipairs(tankLines) do
-    table.insert(lines, line)
+  for _, row in ipairs(tankRows) do
+    table.insert(lines, row.line)
   end
-  for _, line in ipairs(otherLines) do
-    table.insert(lines, line)
+  for _, row in ipairs(otherRows) do
+    table.insert(lines, row.line)
   end
   return lines
 end
