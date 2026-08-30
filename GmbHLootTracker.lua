@@ -2864,29 +2864,56 @@ function UI:EnsureCthunArena()
     return self.cthunArena
   end
   local f = CreateFrame("Frame", nil, self.raidScrollChild, BackdropTemplateMixin and "BackdropTemplate" or nil)
-  -- Match source image aspect (1024×753).
-  local W, H = 760, math.floor(760 * 753 / 1024)
-  f:SetSize(W, H)
+  -- Match website .rs-arena-cthun: square canvas so schema % coords land on the same wedges.
+  local W = 720
+  f:SetSize(W, W)
   setBackdrop(f)
   if f.SetBackdropColor then
-    f:SetBackdropColor(0.05, 0.06, 0.10, 1)
+    f:SetBackdropColor(0.04, 0.05, 0.08, 1)
     f:SetBackdropBorderColor(0.35, 0.22, 0.48, 0.85)
   end
 
+  -- Solid dark fill (no baked screenshot — ghosts/marks on cthun_map misled wedge reading).
   local bg = f:CreateTexture(nil, "BACKGROUND")
   bg:SetAllPoints(f)
-  bg:SetTexture("Interface\\AddOns\\ClassicGmbHQuartermaster\\Textures\\cthun_map")
-  bg:SetTexCoord(0, 1, 135 / 1024, (135 + 753) / 1024)
+  if bg.SetColorTexture then
+    bg:SetColorTexture(0.06, 0.07, 0.11, 1)
+  else
+    bg:SetTexture("Interface\\Buttons\\WHITE8X8")
+    bg:SetVertexColor(0.06, 0.07, 0.11, 1)
+  end
   f.bg = bg
 
+  -- Soft purple center glow (website radial boss blob).
+  local glow = f:CreateTexture(nil, "BACKGROUND", nil, 1)
+  glow:SetPoint("CENTER", f, "CENTER", 0, 0)
+  glow:SetSize(math.floor(W * 0.22), math.floor(W * 0.22))
+  if glow.SetColorTexture then
+    glow:SetColorTexture(0.36, 0.18, 0.54, 0.55)
+  else
+    glow:SetTexture("Interface\\Buttons\\WHITE8X8")
+    glow:SetVertexColor(0.36, 0.18, 0.54, 0.55)
+  end
+  f.glow = glow
+
   f.chips = {}
-  f.glow = nil
-  f.boss = makeLabel(f, "", 1)
-  f.boss:Hide()
-  f.throne = makeLabel(f, "", 1)
-  f.throne:Hide()
-  f.entrance = makeLabel(f, "", 1)
-  f.entrance:Hide()
+  f.boss = makeLabel(f, "C'Thun", 12)
+  f.boss:SetTextColor(0.92, 0.78, 1)
+  f.boss:ClearAllPoints()
+  f.boss:SetPoint("CENTER", f, "CENTER", 0, 0)
+  f.boss:Show()
+
+  f.throne = makeLabel(f, "THRONE", 11)
+  f.throne:SetTextColor(0.91, 0.88, 1)
+  f.throne:ClearAllPoints()
+  f.throne:SetPoint("TOP", f, "TOP", 0, -10)
+  f.throne:Show()
+
+  f.entrance = makeLabel(f, "ENTRANCE", 11)
+  f.entrance:SetTextColor(0.91, 0.88, 1)
+  f.entrance:ClearAllPoints()
+  f.entrance:SetPoint("BOTTOM", f, "BOTTOM", 0, 10)
+  f.entrance:Show()
 
   self.cthunArena = f
   return f

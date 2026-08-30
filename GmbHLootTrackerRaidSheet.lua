@@ -1461,10 +1461,10 @@ local function renderPlain(ctx, section, heading, solo)
 end
 
 --------------------------------------------------------------------
--- C'Thun arena — uses Textures/cthun_map.tga and sheet slot coords
+-- C'Thun arena — schema % coords on a square canvas (match website)
 --------------------------------------------------------------------
 
--- Coords from aq40_schema — percent of C'Thun map image.
+-- Coords from aq40_schema — percent of square arena (same as website CSS).
 local CTHUN_SLOT_POS = {
   ["cthun_w1_m1"] = { 42.92, 31.06, "skull", "melee" },
   ["cthun_w1_m2"] = { 42.92, 34.76, "skull", "melee" },
@@ -1529,25 +1529,57 @@ local function renderCthun(ctx, section)
     return
   end
 
-  -- Same aspect as the map image (1024×753).
-  local MAP_W = 760
-  local MAP_H = math.floor(MAP_W * 753 / 1024)
+  -- Square like website .rs-arena-cthun (baked 1024×753 map squashed wedges/marks).
+  local MAP = 720
   local arena = ui:EnsureCthunArena()
   arena:ClearAllPoints()
   local scrollW = (ui.raidScrollChild and ui.raidScrollChild:GetWidth()) or 1000
-  local leftPad = math.max(8, math.floor((scrollW - MAP_W) / 2))
+  local leftPad = math.max(8, math.floor((scrollW - MAP) / 2))
   arena:SetPoint("TOPLEFT", ui.raidScrollChild, "TOPLEFT", leftPad, ctx.y)
-  arena:SetSize(MAP_W, MAP_H)
+  arena:SetSize(MAP, MAP)
   if arena.bg then
-    arena.bg:SetTexture("Interface\\AddOns\\ClassicGmbHQuartermaster\\Textures\\cthun_map")
-    arena.bg:SetTexCoord(0, 1, 135 / 1024, (135 + 753) / 1024)
+    arena.bg:SetTexCoord(0, 1, 0, 1)
+    if arena.bg.SetColorTexture then
+      arena.bg:SetColorTexture(0.06, 0.07, 0.11, 1)
+    else
+      arena.bg:SetTexture("Interface\\Buttons\\WHITE8X8")
+      arena.bg:SetVertexColor(0.06, 0.07, 0.11, 1)
+    end
     arena.bg:Show()
   end
+  if not arena.glow then
+    local glow = arena:CreateTexture(nil, "BACKGROUND", nil, 1)
+    if glow.SetColorTexture then
+      glow:SetColorTexture(0.36, 0.18, 0.54, 0.55)
+    else
+      glow:SetTexture("Interface\\Buttons\\WHITE8X8")
+      glow:SetVertexColor(0.36, 0.18, 0.54, 0.55)
+    end
+    arena.glow = glow
+  end
   if arena.glow then
-    arena.glow:Hide()
+    arena.glow:ClearAllPoints()
+    arena.glow:SetPoint("CENTER", arena, "CENTER", 0, 0)
+    arena.glow:SetSize(math.floor(MAP * 0.22), math.floor(MAP * 0.22))
+    arena.glow:Show()
   end
   if arena.boss then
-    arena.boss:Hide()
+    arena.boss:SetText("C'Thun")
+    arena.boss:ClearAllPoints()
+    arena.boss:SetPoint("CENTER", arena, "CENTER", 0, 0)
+    arena.boss:Show()
+  end
+  if arena.throne then
+    arena.throne:SetText("THRONE")
+    arena.throne:ClearAllPoints()
+    arena.throne:SetPoint("TOP", arena, "TOP", 0, -10)
+    arena.throne:Show()
+  end
+  if arena.entrance then
+    arena.entrance:SetText("ENTRANCE")
+    arena.entrance:ClearAllPoints()
+    arena.entrance:SetPoint("BOTTOM", arena, "BOTTOM", 0, 10)
+    arena.entrance:Show()
   end
   arena:Show()
 
@@ -1572,14 +1604,14 @@ local function renderCthun(ctx, section)
   for _, sid in ipairs(order) do
     local pos = CTHUN_SLOT_POS[sid]
     local slot = byId[sid]
-    -- Prefer live sheet x/y when present (same map).
-    local xPct = (slot and tonumber(slot.x)) or pos[1]
-    local yPct = (slot and tonumber(slot.y)) or pos[2]
+    -- Always use schema table coords (ignore stale HelperData x/y from older layouts).
+    local xPct = pos[1]
+    local yPct = pos[2]
 
     chipIdx = chipIdx + 1
     local chip = ui:EnsureCthunChip(chipIdx)
-    local px = (xPct / 100) * MAP_W
-    local py = (yPct / 100) * MAP_H
+    local px = (xPct / 100) * MAP
+    local py = (yPct / 100) * MAP
     chip:ClearAllPoints()
     chip:SetPoint("CENTER", arena, "TOPLEFT", px, -py)
 
@@ -1589,8 +1621,8 @@ local function renderCthun(ctx, section)
     if slot and slot.mark and tostring(slot.mark) ~= "" then
       mk = string.lower(tostring(slot.mark))
     end
-    -- One raid mark per melee stack (on m1), matching the map template.
-    local isStackMark = ring == "melee" and string.find(sid, "_m1", 1, true) ~= nil
+    -- One raid mark per melee stack (on m1 only — not out_m1 / mid seats).
+    local isStackMark = ring == "melee" and string.match(sid, "_m1$") ~= nil
     local markBit = ""
     if isStackMark and mk ~= "" and MARK_ICON[mk] then
       markBit = markIcon(mk)
@@ -1600,21 +1632,21 @@ local function renderCthun(ctx, section)
       chip.text:SetText(markBit .. coloredText(playerColorHex(slot), cthunShortName(name)))
       chip.text:SetTextColor(1, 1, 1)
       if chip.SetBackdropColor then
-        chip:SetBackdropColor(0.08, 0.09, 0.12, 0.55)
-        chip:SetBackdropBorderColor(0.40, 0.44, 0.52, 0.55)
+        chip:SetBackdropColor(0.08, 0.09, 0.12, 0.72)
+        chip:SetBackdropBorderColor(0.40, 0.44, 0.52, 0.65)
       end
     elseif markBit ~= "" then
       chip.text:SetText(markBit)
       chip.text:SetTextColor(1, 1, 1)
       if chip.SetBackdropColor then
-        chip:SetBackdropColor(0.10, 0.11, 0.14, 0.40)
-        chip:SetBackdropBorderColor(0.30, 0.32, 0.38, 0.45)
+        chip:SetBackdropColor(0.10, 0.11, 0.14, 0.45)
+        chip:SetBackdropBorderColor(0.30, 0.32, 0.38, 0.50)
       end
     else
       chip.text:SetText("")
       if chip.SetBackdropColor then
-        chip:SetBackdropColor(0.12, 0.13, 0.16, 0.35)
-        chip:SetBackdropBorderColor(0.30, 0.32, 0.38, 0.45)
+        chip:SetBackdropColor(0.12, 0.13, 0.16, 0.40)
+        chip:SetBackdropBorderColor(0.30, 0.32, 0.38, 0.50)
       end
     end
     chip:SetSize(isStackMark and 86 or 76, 15)
@@ -1625,7 +1657,7 @@ local function renderCthun(ctx, section)
     arena.chips[i]:Hide()
   end
 
-  ctx.y = ctx.y - MAP_H - 10
+  ctx.y = ctx.y - MAP - 10
   ctx:gap(4)
 end
 
