@@ -19,6 +19,12 @@ local MARK_ICON = U.MARK_ICON or {
   star = "|TInterface\\TargetingFrame\\UI-RaidTargetingIcon_1:10:10:0:0|t",
 }
 
+-- Raid-target texture index (for a standalone icon beside a chip, not inline text).
+local MARK_TEX_INDEX = {
+  skull = 8, cross = 7, square = 6, moon = 5,
+  triangle = 4, diamond = 3, circle = 2, star = 1,
+}
+
 -- Fallback board marks when sync has no board.mark yet (boss/pack boards).
 -- Twins: marks live on tank/lock SLOTS only — not on the boss boards.
 local BOARD_MARK_FALLBACK = {
@@ -1623,24 +1629,21 @@ local function renderCthun(ctx, section)
     end
     -- One raid mark per melee stack (on m1 only — not out_m1 / mid seats).
     local isStackMark = ring == "melee" and string.match(sid, "_m1$") ~= nil
-    local markBit = ""
-    if isStackMark and mk ~= "" and MARK_ICON[mk] then
-      markBit = markIcon(mk)
+    if chip.mark then
+      if isStackMark and mk ~= "" and MARK_TEX_INDEX[mk] then
+        chip.mark:SetTexture("Interface\\TargetingFrame\\UI-RaidTargetingIcon_" .. MARK_TEX_INDEX[mk])
+        chip.mark:Show()
+      else
+        chip.mark:Hide()
+      end
     end
 
     if name ~= "" then
-      chip.text:SetText(markBit .. coloredText(playerColorHex(slot), cthunShortName(name)))
+      chip.text:SetText(coloredText(playerColorHex(slot), cthunShortName(name)))
       chip.text:SetTextColor(1, 1, 1)
       if chip.SetBackdropColor then
         chip:SetBackdropColor(0.08, 0.09, 0.12, 0.72)
         chip:SetBackdropBorderColor(0.40, 0.44, 0.52, 0.65)
-      end
-    elseif markBit ~= "" then
-      chip.text:SetText(markBit)
-      chip.text:SetTextColor(1, 1, 1)
-      if chip.SetBackdropColor then
-        chip:SetBackdropColor(0.10, 0.11, 0.14, 0.45)
-        chip:SetBackdropBorderColor(0.30, 0.32, 0.38, 0.50)
       end
     else
       chip.text:SetText("")
@@ -1649,7 +1652,9 @@ local function renderCthun(ctx, section)
         chip:SetBackdropBorderColor(0.30, 0.32, 0.38, 0.50)
       end
     end
-    chip:SetSize(isStackMark and 86 or 76, 15)
+    -- Uniform melee width so each wedge's m1/m2 stack aligns (match website).
+    local chipW = (ring == "melee") and 84 or 76
+    chip:SetSize(chipW, 15)
     chip:Show()
   end
 

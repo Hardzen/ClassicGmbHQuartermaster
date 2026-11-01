@@ -2938,6 +2938,11 @@ function UI:EnsureCthunChip(i)
   chip.text:SetPoint("LEFT", chip, "LEFT", 3, 0)
   chip.text:SetPoint("RIGHT", chip, "RIGHT", -3, 0)
   chip.text:SetJustifyH("CENTER")
+  -- Raid mark as a standalone icon just left of the box (keeps m1/m2 names aligned).
+  chip.mark = chip:CreateTexture(nil, "OVERLAY")
+  chip.mark:SetSize(12, 12)
+  chip.mark:SetPoint("RIGHT", chip, "LEFT", -1, 0)
+  chip.mark:Hide()
   chips[i] = chip
   return chip
 end
