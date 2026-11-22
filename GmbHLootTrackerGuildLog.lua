@@ -121,26 +121,62 @@ local function readSnapshot()
   return out
 end
 
+local function reassignFingerprints(list)
+  local occ = {}
+  for i = 1, #list do
+    local ev = list[i]
+    local key = eventTuple(ev)
+    occ[key] = (occ[key] or 0) + 1
+    ev.fp = fingerprintFor(ev, occ[key])
+  end
+end
+
+-- Drop synthetic gaps and collapse identical type|p1|p2|rank rows.
+-- Needed after fp format changes: failed overlap used to re-append the whole
+-- Classic 100-event window every minute (~10x duplicates in SavedVariables).
+local function compactEvents(events)
+  local seen = {}
+  local out = {}
+  for i = 1, #events do
+    local ev = events[i]
+    if type(ev) == "table" and ev.t and ev.t ~= "gap" then
+      local key = eventTuple(ev)
+      if key ~= "" and not seen[key] then
+        seen[key] = true
+        out[#out + 1] = ev
+      end
+    end
+  end
+  reassignFingerprints(out)
+  for i = 1, #out do
+    events[i] = out[i]
+  end
+  for i = #out + 1, #events do
+    events[i] = nil
+  end
+end
+
 local function findOverlap(saved, snap)
   local savedN = #saved
   local snapN = #snap
   if savedN == 0 or snapN == 0 then
-    return 0, 0
+    return 0
   end
   local maxLen = math.min(savedN, snapN)
   for len = maxLen, 1, -1 do
     local ok = true
     for i = 1, len do
-      if saved[savedN - len + i].fp ~= snap[i].fp then
+      -- Compare stable identity, not raw fp (old rows may still embed relative time).
+      if eventTuple(saved[savedN - len + i]) ~= eventTuple(snap[i]) then
         ok = false
         break
       end
     end
     if ok then
-      return len, savedN - len
+      return len
     end
   end
-  return 0, savedN
+  return 0
 end
 
 local function trimEvents(events)
@@ -164,6 +200,9 @@ local function mergeSnapshot(snap)
     return 0
   end
 
+  compactEvents(saved)
+  reassignFingerprints(snap)
+
   if #saved == 0 then
     for i = 1, #snap do
       saved[#saved + 1] = snap[i]
@@ -173,21 +212,22 @@ local function mergeSnapshot(snap)
   end
 
   local overlapLen = findOverlap(saved, snap)
-  if overlapLen == 0 then
-    -- Window scrolled past saved tail: append the new window only.
-    -- Do not store a synthetic "gap" event (never post that to Discord).
-    for i = 1, #snap do
-      saved[#saved + 1] = snap[i]
-    end
-    trimEvents(saved)
-    return #snap
+  local have = {}
+  for i = 1, #saved do
+    have[eventTuple(saved[i])] = true
   end
 
   local added = 0
-  for i = overlapLen + 1, #snap do
-    saved[#saved + 1] = snap[i]
-    added = added + 1
+  local start = overlapLen > 0 and (overlapLen + 1) or 1
+  for i = start, #snap do
+    local key = eventTuple(snap[i])
+    if key ~= "" and not have[key] then
+      have[key] = true
+      saved[#saved + 1] = snap[i]
+      added = added + 1
+    end
   end
+  reassignFingerprints(saved)
   trimEvents(saved)
   return added
 end
