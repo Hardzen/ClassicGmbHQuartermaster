@@ -174,27 +174,8 @@ local function mergeSnapshot(snap)
 
   local overlapLen = findOverlap(saved, snap)
   if overlapLen == 0 then
-    -- Window scrolled past saved tail: treat whole snapshot as new and note a gap.
-    local gap = {
-      kind = "gap",
-      missed = #snap,
-      at = date("!%Y-%m-%dT%H:%M:%SZ"),
-      fp = "gap|" .. tostring(time() or 0) .. "|" .. tostring(#snap),
-    }
-    db.gaps[#db.gaps + 1] = gap
-    -- Also store a marker event so the uploader can report it.
-    saved[#saved + 1] = {
-      t = "gap",
-      p1 = "",
-      p2 = "",
-      rank = "",
-      y = 0,
-      m = 0,
-      d = 0,
-      h = 0,
-      missed = #snap,
-      fp = gap.fp,
-    }
+    -- Window scrolled past saved tail: append the new window only.
+    -- Do not store a synthetic "gap" event (never post that to Discord).
     for i = 1, #snap do
       saved[#saved + 1] = snap[i]
     end
