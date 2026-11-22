@@ -2,7 +2,7 @@
 
 WoW Classic Era addon for raid sheet bosses/assignments, officer wishlist, and guild peer sync.
 
-**Version:** 1.8.89
+**Version:** 1.8.91
 
 ## Install
 
@@ -53,6 +53,7 @@ Example: `C'Thun | MT | Hardzor | Warrior | Tank`
 - `GmbHLootTrackerComm.lua`
 - `GmbHLootTrackerRaidSheet.lua`
 - `GmbHLootTrackerSync.lua`
+- `GmbHLootTrackerGuildLog.lua` â€” officer+ Classic guild event log capture
 - `HelperData.lua` (filled by helper or `write_helperdata.py`; ships as nil)
 - `write_helperdata.py` â€” build HelperData from JSON or questions
 - `example_helperdata.json` â€” sample input for the script
