@@ -69,16 +69,14 @@ local function bareName(name)
   return (tostring(name):match("^([^%-]+)")) or tostring(name)
 end
 
+-- Identity only — Classic y/m/d/h are relative ages and drift every hour.
+-- The website re-hashes type|p1|p2|rank|#n for durable Discord dedupe.
 local function eventTuple(ev)
   return table.concat({
     tostring(ev.t or ""),
     bareName(ev.p1 or ""),
     bareName(ev.p2 or ""),
     tostring(ev.rank or ""),
-    tostring(ev.y or 0),
-    tostring(ev.m or 0),
-    tostring(ev.d or 0),
-    tostring(ev.h or 0),
   }, "|")
 end
 
